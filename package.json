@@ -1,23 +1,19 @@
 {
   "name": "cartwhisper-backend",
   "version": "1.0.0",
-  "description": "CartWhisper AI Backend - Railway Deployment",
+  "description": "CartWhisper AI Backend",
   "main": "src/index.js",
   "scripts": {
-    "start": "node src/index.js",
-    "postinstall": "prisma generate"
+    "start": "node src/index.js"
   },
   "engines": {
     "node": ">=18.0.0"
   },
   "dependencies": {
-    "@prisma/client": "^5.22.0",
     "cors": "^2.8.5",
     "express": "^4.21.0",
     "express-rate-limit": "^7.4.0",
-    "helmet": "^7.1.0"
-  },
-  "devDependencies": {
-    "prisma": "^5.22.0"
+    "helmet": "^7.1.0",
+    "pg": "^8.11.3"
   }
 }
