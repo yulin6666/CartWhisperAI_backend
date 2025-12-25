@@ -3,8 +3,8 @@
 # CartWhisper AI Backend API Test Script
 # Usage: ./scripts/test-api.sh
 
-BASE_URL="${BASE_URL:-https://cartwhisperaibackend-production.up.railway.app}"
-API_KEY="${API_KEY:-cw_test_key_12345}"
+BASE_URL="https://cartwhisperaibackend-production.up.railway.app"
+API_KEY="cw_durian_2024_secret"
 
 echo "========================================"
 echo "CartWhisper AI Backend API Test"
