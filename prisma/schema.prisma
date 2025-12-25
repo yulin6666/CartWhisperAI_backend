@@ -3,9 +3,12 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DATABASE_URL")
 }
+
+// 构建时需要设置虚拟 DATABASE_URL，见 railway.json
 
 model Shop {
   id        String   @id @default(cuid())
