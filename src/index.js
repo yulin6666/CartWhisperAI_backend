@@ -145,6 +145,47 @@ ${others.map((p, i) => `${i + 1}. ID:${p.productId} ${p.title}`).join('\n')}
 
 // ============ Routes ============
 
+// 商店注册 - 自动获取 API Key
+app.post('/api/shops/register', async (req, res) => {
+  try {
+    const { domain } = req.body;
+    if (!domain) return res.status(400).json({ error: 'Domain required' });
+
+    const cleanDomain = domain.replace(/^https?:\/\//, '').replace(/\/$/, '');
+
+    // 检查是否已存在
+    const existing = await pool.query('SELECT * FROM "Shop" WHERE "domain" = $1', [cleanDomain]);
+    if (existing.rows.length > 0) {
+      return res.json({
+        success: true,
+        apiKey: existing.rows[0].apiKey,
+        isNew: false,
+        message: 'Shop already registered'
+      });
+    }
+
+    // 生成新的 API Key
+    const apiKey = `cw_${crypto.randomUUID().replace(/-/g, '')}`;
+    const shopId = `shop_${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`;
+
+    await pool.query(
+      'INSERT INTO "Shop" ("id", "domain", "apiKey", "createdAt") VALUES ($1, $2, $3, NOW())',
+      [shopId, cleanDomain, apiKey]
+    );
+
+    console.log(`[Register] New shop: ${cleanDomain}`);
+    res.json({
+      success: true,
+      apiKey,
+      isNew: true,
+      message: 'Shop registered successfully'
+    });
+  } catch (e) {
+    console.error('[Register] Error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/api/health', async (req, res) => {
   try {
     await pool.query('SELECT 1');
