@@ -250,6 +250,65 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
   }
 });
 
+// 公开推荐接口（供 Theme Extension 使用，通过 shop 参数识别）
+app.get('/api/storefront/recommendations', queryLimiter, async (req, res) => {
+  // CORS 头
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type');
+
+  try {
+    const { shop, product_id, limit: limitParam } = req.query;
+    if (!shop || !product_id) {
+      return res.status(400).json({ error: 'Missing shop or product_id parameter' });
+    }
+
+    const limit = Math.min(parseInt(limitParam) || 3, 10);
+
+    // 通过 shop domain 查找商店
+    const cleanDomain = shop.replace(/^https?:\/\//, '').replace(/\/$/, '');
+    const shopResult = await pool.query('SELECT * FROM "Shop" WHERE "domain" = $1', [cleanDomain]);
+    if (shopResult.rows.length === 0) {
+      return res.json({ productId: product_id, recommendations: [] });
+    }
+
+    const shopId = shopResult.rows[0].id;
+
+    // 查找商品
+    const srcRes = await pool.query(
+      'SELECT * FROM "Product" WHERE "shopId" = $1 AND ("productId" = $2 OR "handle" = $2)',
+      [shopId, product_id]
+    );
+    if (!srcRes.rows.length) {
+      return res.json({ productId: product_id, recommendations: [] });
+    }
+
+    // 获取推荐
+    const recs = await pool.query(`
+      SELECT r.*, p."productId", p."handle", p."title", p."price", p."image"
+      FROM "Recommendation" r
+      JOIN "Product" p ON r."targetId" = p."id"
+      WHERE r."shopId" = $1 AND r."sourceId" = $2
+      LIMIT $3
+    `, [shopId, srcRes.rows[0].id, limit]);
+
+    res.json({
+      productId: product_id,
+      recommendations: recs.rows.map(r => ({
+        id: r.productId,
+        handle: r.handle,
+        title: r.title,
+        price: r.price,
+        image: r.image,
+        reason: r.reason
+      }))
+    });
+  } catch (e) {
+    console.error('[Storefront] Error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/api/recommendations/:productId', queryLimiter, auth, async (req, res) => {
   try {
     const shopId = req.shop.id;
