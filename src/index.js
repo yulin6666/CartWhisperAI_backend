@@ -131,9 +131,14 @@ async function generateRecommendations(products, allProducts = null) {
   const results = [];
 
   for (const product of products) {
-    // 过滤：排除相同 ID 的产品 AND 排除同款产品
+    // 过滤：
+    // 1. 排除相同 ID 的产品
+    // 2. 排除同款产品（基于 handle）
+    // 3. 排除同类型的产品（基于 productType）- 不推荐同类商品
     const others = targetPool.filter(p =>
-      p.productId !== product.productId && !isSameProduct(product, p)
+      p.productId !== product.productId &&
+      !isSameProduct(product, p) &&
+      (product.productType || '').toLowerCase() !== (p.productType || '').toLowerCase()
     );
     if (others.length === 0) continue;
 
@@ -177,13 +182,9 @@ ${others.map((p, i) => `${i + 1}. ID:${p.productId} ${p.title} (¥${p.price})`).
         console.error('[AI] Parse error:', e.message);
       }
     } else {
-      // Fallback: 不同类型的搭配推荐
-      const differentType = others
-        .filter(p => p.productType !== product.productType)
-        .slice(0, 3);
-
-      if (differentType.length > 0) {
-        differentType.forEach(t => {
+      // Fallback: 推荐不同类型的商品（others 已经过滤了同类）
+      if (others.length > 0) {
+        others.slice(0, 3).forEach(t => {
           results.push({
             sourceId: product.productId,
             targetId: t.productId,
