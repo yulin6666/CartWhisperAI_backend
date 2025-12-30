@@ -111,6 +111,19 @@ async function callDeepSeek(prompt) {
   }
 }
 
+// 判断是否是同款产品（基于 handle 前缀）
+function isSameProduct(product1, product2) {
+  if (!product1.handle || !product2.handle) return false;
+
+  // 提取 handle 的主要部分（去掉颜色/尺寸后缀）
+  const normalize = (handle) => {
+    // 移除末尾的颜色或尺寸相关的部分，如 -white, -black, -s, -m, -l 等
+    return handle.replace(/-[a-z0-9]*$/, '').toLowerCase();
+  };
+
+  return normalize(product1.handle) === normalize(product2.handle);
+}
+
 async function generateRecommendations(products, allProducts = null) {
   // products: 需要生成推荐的商品
   // allProducts: 所有可选的推荐目标商品（如果为空，则使用 products）
@@ -118,29 +131,66 @@ async function generateRecommendations(products, allProducts = null) {
   const results = [];
 
   for (const product of products) {
-    const others = targetPool.filter(p => p.productId !== product.productId);
+    // 过滤：排除相同 ID 的产品 AND 排除同款产品
+    const others = targetPool.filter(p =>
+      p.productId !== product.productId && !isSameProduct(product, p)
+    );
     if (others.length === 0) continue;
 
-    const prompt = `商品: ${product.title} (${product.productType || '未分类'}, ¥${product.price})
-候选:
-${others.map((p, i) => `${i + 1}. ID:${p.productId} ${p.title}`).join('\n')}
-选3个搭配商品，返回:{"recommendations":[{"productId":"xxx","reason":"理由"}]}`;
+    const prompt = `你是电商推荐专家。请为以下商品推荐3个最佳搭配产品。
+
+商品: ${product.title}
+类型: ${product.productType || '未分类'}
+价格: ¥${product.price}
+
+可选搭配商品:
+${others.map((p, i) => `${i + 1}. ID:${p.productId} ${p.title} (¥${p.price})`).join('\n')}
+
+请返回JSON格式，包含3个推荐。每个推荐需要包含:
+- productId: 推荐商品的ID
+- reason: 推荐理由（中英双语，格式："中文理由|English reason"）
+
+只返回JSON，不要其他内容:
+{"recommendations":[{"productId":"xxx","reason":"中文理由|English reason"}]}`;
 
     const aiRes = await callDeepSeek(prompt);
     if (aiRes) {
       try {
         const json = aiRes.match(/\{[\s\S]*\}/)?.[0];
         const parsed = JSON.parse(json);
+        const seen = new Set(); // 避免重复推荐
         for (const rec of (parsed.recommendations || []).slice(0, 3)) {
-          const target = others.find(p => p.productId === String(rec.productId));
-          if (target) results.push({ sourceId: product.productId, targetId: target.productId, reason: rec.reason || '' });
+          const productId = String(rec.productId);
+          if (seen.has(productId)) continue;
+
+          const target = others.find(p => p.productId === productId);
+          if (target) {
+            seen.add(productId);
+            results.push({
+              sourceId: product.productId,
+              targetId: target.productId,
+              reason: rec.reason || '推荐搭配|Recommended pairing'
+            });
+          }
         }
-      } catch (e) {}
+      } catch (e) {
+        console.error('[AI] Parse error:', e.message);
+      }
     } else {
-      // Fallback
-      others.filter(p => p.productType === product.productType).slice(0, 3).forEach(t => {
-        results.push({ sourceId: product.productId, targetId: t.productId, reason: '同类推荐' });
-      });
+      // Fallback: 不同类型的搭配推荐
+      const differentType = others
+        .filter(p => p.productType !== product.productType)
+        .slice(0, 3);
+
+      if (differentType.length > 0) {
+        differentType.forEach(t => {
+          results.push({
+            sourceId: product.productId,
+            targetId: t.productId,
+            reason: '完美搭配|Perfect match'
+          });
+        });
+      }
     }
     if (process.env.DEEPSEEK_API_KEY) await new Promise(r => setTimeout(r, 200));
   }
