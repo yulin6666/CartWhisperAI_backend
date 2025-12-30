@@ -415,8 +415,10 @@ app.get('/api/recommendations', queryLimiter, auth, async (req, res) => {
       SELECT
         sp."productId" as "sourceProductId",
         sp."title" as "sourceTitle",
+        sp."image" as "sourceImage",
         tp."productId" as "targetProductId",
         tp."title" as "targetTitle",
+        tp."image" as "targetImage",
         r."reason",
         r."createdAt"
       FROM "Recommendation" r
