@@ -111,10 +111,14 @@ async function callDeepSeek(prompt) {
   }
 }
 
-async function generateRecommendations(products) {
+async function generateRecommendations(products, allProducts = null) {
+  // products: 需要生成推荐的商品
+  // allProducts: 所有可选的推荐目标商品（如果为空，则使用 products）
+  const targetPool = allProducts || products;
   const results = [];
+
   for (const product of products) {
-    const others = products.filter(p => p.productId !== product.productId);
+    const others = targetPool.filter(p => p.productId !== product.productId);
     if (others.length === 0) continue;
 
     const prompt = `商品: ${product.title} (${product.productType || '未分类'}, ¥${product.price})
@@ -198,11 +202,11 @@ app.get('/api/health', async (req, res) => {
 app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
   const client = await pool.connect();
   try {
-    const { products } = req.body;
+    const { products, regenerate } = req.body; // regenerate=true 强制重新生成所有推荐
     if (!Array.isArray(products) || !products.length) return res.status(400).json({ error: 'Products required' });
 
     const shopId = req.shop.id;
-    console.log(`[Sync] ${req.shop.domain}: ${products.length} products`);
+    console.log(`[Sync] ${req.shop.domain}: ${products.length} products, regenerate=${!!regenerate}`);
 
     const saved = [];
     for (const p of products) {
@@ -221,27 +225,53 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
       saved.push(result.rows[0]);
     }
 
-    console.log(`[Sync] Generating recommendations...`);
-    const recs = await generateRecommendations(saved);
-
-    await client.query('DELETE FROM "Recommendation" WHERE "shopId" = $1', [shopId]);
+    // 找出没有推荐的商品
+    let productsNeedingRecs = saved;
+    if (!regenerate) {
+      const existingRecs = await client.query(
+        'SELECT DISTINCT "sourceId" FROM "Recommendation" WHERE "shopId" = $1',
+        [shopId]
+      );
+      const existingSourceIds = new Set(existingRecs.rows.map(r => r.sourceId));
+      productsNeedingRecs = saved.filter(p => !existingSourceIds.has(p.id));
+      console.log(`[Sync] ${productsNeedingRecs.length} products need new recommendations`);
+    } else {
+      // 如果强制重新生成，先删除所有旧推荐
+      await client.query('DELETE FROM "Recommendation" WHERE "shopId" = $1', [shopId]);
+      console.log(`[Sync] Regenerating all recommendations...`);
+    }
 
     let count = 0;
-    for (const rec of recs) {
-      const src = saved.find(p => p.productId === rec.sourceId);
-      const tgt = saved.find(p => p.productId === rec.targetId);
-      if (src && tgt) {
-        await client.query(
-          'INSERT INTO "Recommendation" ("id", "shopId", "sourceId", "targetId", "reason") VALUES ($1, $2, $3, $4, $5)',
-          [crypto.randomUUID(), shopId, src.id, tgt.id, rec.reason]
-        );
-        count++;
+    if (productsNeedingRecs.length > 0) {
+      console.log(`[Sync] Generating recommendations for ${productsNeedingRecs.length} products...`);
+      const recs = await generateRecommendations(productsNeedingRecs, saved);
+
+      for (const rec of recs) {
+        const src = saved.find(p => p.productId === rec.sourceId);
+        const tgt = saved.find(p => p.productId === rec.targetId);
+        if (src && tgt) {
+          // 使用 ON CONFLICT 避免重复插入
+          await client.query(`
+            INSERT INTO "Recommendation" ("id", "shopId", "sourceId", "targetId", "reason")
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT ("shopId", "sourceId", "targetId") DO UPDATE SET "reason" = $5
+          `, [crypto.randomUUID(), shopId, src.id, tgt.id, rec.reason]);
+          count++;
+        }
       }
     }
 
-    console.log(`[Sync] Done: ${saved.length} products, ${count} recommendations`);
+    // 获取总推荐数
+    const totalRecs = await client.query('SELECT COUNT(*) FROM "Recommendation" WHERE "shopId" = $1', [shopId]);
+
+    console.log(`[Sync] Done: ${saved.length} products, ${count} new recommendations, ${totalRecs.rows[0].count} total`);
     cache.clear();
-    res.json({ success: true, products: saved.length, recommendations: count });
+    res.json({
+      success: true,
+      products: saved.length,
+      newRecommendations: count,
+      totalRecommendations: parseInt(totalRecs.rows[0].count)
+    });
   } catch (e) {
     console.error('[Sync] Error:', e);
     res.status(500).json({ error: e.message });
@@ -306,6 +336,101 @@ app.get('/api/storefront/recommendations', queryLimiter, async (req, res) => {
   } catch (e) {
     console.error('[Storefront] Error:', e);
     res.status(500).json({ error: e.message });
+  }
+});
+
+// ============ 管理 API ============
+
+// 查询商店的所有推荐
+app.get('/api/recommendations', queryLimiter, auth, async (req, res) => {
+  try {
+    const shopId = req.shop.id;
+    const limit = Math.min(parseInt(req.query.limit) || 100, 1000);
+    const offset = parseInt(req.query.offset) || 0;
+
+    // 获取商品数量
+    const productCount = await pool.query(
+      'SELECT COUNT(*) FROM "Product" WHERE "shopId" = $1',
+      [shopId]
+    );
+
+    // 获取推荐数量
+    const recCount = await pool.query(
+      'SELECT COUNT(*) FROM "Recommendation" WHERE "shopId" = $1',
+      [shopId]
+    );
+
+    // 获取所有推荐（按源商品分组）
+    const recs = await pool.query(`
+      SELECT
+        sp."productId" as "sourceProductId",
+        sp."title" as "sourceTitle",
+        tp."productId" as "targetProductId",
+        tp."title" as "targetTitle",
+        r."reason",
+        r."createdAt"
+      FROM "Recommendation" r
+      JOIN "Product" sp ON r."sourceId" = sp."id"
+      JOIN "Product" tp ON r."targetId" = tp."id"
+      WHERE r."shopId" = $1
+      ORDER BY sp."productId", r."createdAt"
+      LIMIT $2 OFFSET $3
+    `, [shopId, limit, offset]);
+
+    res.json({
+      shop: req.shop.domain,
+      stats: {
+        products: parseInt(productCount.rows[0].count),
+        recommendations: parseInt(recCount.rows[0].count)
+      },
+      recommendations: recs.rows,
+      pagination: { limit, offset, returned: recs.rows.length }
+    });
+  } catch (e) {
+    console.error('[Admin] Error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 删除商店的所有推荐
+app.delete('/api/recommendations', auth, async (req, res) => {
+  try {
+    const shopId = req.shop.id;
+    const result = await pool.query('DELETE FROM "Recommendation" WHERE "shopId" = $1', [shopId]);
+    console.log(`[Admin] Deleted ${result.rowCount} recommendations for ${req.shop.domain}`);
+    cache.clear();
+    res.json({ success: true, deleted: result.rowCount });
+  } catch (e) {
+    console.error('[Admin] Error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 删除商店的所有商品和推荐
+app.delete('/api/products', auth, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const shopId = req.shop.id;
+
+    // 先删除推荐（外键约束）
+    const recResult = await client.query('DELETE FROM "Recommendation" WHERE "shopId" = $1', [shopId]);
+    // 再删除商品
+    const prodResult = await client.query('DELETE FROM "Product" WHERE "shopId" = $1', [shopId]);
+
+    console.log(`[Admin] Deleted ${prodResult.rowCount} products and ${recResult.rowCount} recommendations for ${req.shop.domain}`);
+    cache.clear();
+    res.json({
+      success: true,
+      deleted: {
+        products: prodResult.rowCount,
+        recommendations: recResult.rowCount
+      }
+    });
+  } catch (e) {
+    console.error('[Admin] Error:', e);
+    res.status(500).json({ error: e.message });
+  } finally {
+    client.release();
   }
 });
 
