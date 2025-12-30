@@ -270,3 +270,18 @@ CartWhisperAI_backend/
 本项目使用原生 `pg` 库直接操作 PostgreSQL，不使用 ORM，避免了构建时需要数据库连接的问题。
 
 数据库表在应用启动时自动创建（`CREATE TABLE IF NOT EXISTS`）。
+
+## 重要指令
+
+  # 使用您的API Key删除所有推荐
+  curl -X DELETE -H "X-API-Key: cw_98b991c5c6cf41fc8fd601933b634cfa" \
+    "https://cartwhisperaibackend-production.up.railway.app/api/recommendations"
+
+  # 或者删除所有商品和推荐
+  curl -X DELETE -H "X-API-Key: cw_98b991c5c6cf41fc8fd601933b634cfa" \
+    "https://cartwhisperaibackend-production.up.railway.app/api/products"
+
+  2. 查询商店所有推荐
+
+  curl -H "X-API-Key: cw_98b991c5c6cf41fc8fd601933b634cfa" \
+    "https://cartwhisperaibackend-production.up.railway.app/api/recommendations"

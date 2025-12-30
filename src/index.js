@@ -345,7 +345,7 @@ app.get('/api/storefront/recommendations', queryLimiter, async (req, res) => {
 app.get('/api/recommendations', queryLimiter, auth, async (req, res) => {
   try {
     const shopId = req.shop.id;
-    const limit = Math.min(parseInt(req.query.limit) || 100, 1000);
+    const limit = parseInt(req.query.limit) || 999999;
     const offset = parseInt(req.query.offset) || 0;
 
     // 获取商品数量
