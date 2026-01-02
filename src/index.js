@@ -74,6 +74,9 @@ async function initDatabase() {
     await addColumn('Shop', 'initialSyncDone', 'BOOLEAN', 'false');
     await addColumn('Shop', 'lastRefreshAt', 'TIMESTAMP', null);
     await addColumn('Shop', 'productCount', 'INTEGER', '0');
+    // API usage tracking
+    await addColumn('Shop', 'apiCallsToday', 'INTEGER', '0');
+    await addColumn('Shop', 'apiCallsDate', 'DATE', null);
 
     await client.query(`CREATE INDEX IF NOT EXISTS "Shop_plan_idx" ON "Shop"("plan")`);
 
@@ -95,6 +98,12 @@ const queryLimiter = rateLimit({ windowMs: 60000, max: 300 });
 const cache = new Map();
 const CACHE_TTL = 300000;
 
+// API 限额配置
+const API_LIMITS = {
+  free: 5000,   // 5,000 calls/day
+  pro: 50000    // 50,000 calls/day
+};
+
 // ============ Auth ============
 async function auth(req, res, next) {
   const apiKey = req.headers['x-api-key'];
@@ -104,6 +113,51 @@ async function auth(req, res, next) {
   if (result.rows.length === 0) return res.status(401).json({ error: 'Invalid API key' });
 
   req.shop = result.rows[0];
+  next();
+}
+
+// API 限额检查和计数中间件
+async function trackApiUsage(req, res, next) {
+  const shop = req.shop;
+  if (!shop) return next();
+
+  const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+  const plan = shop.plan || 'free';
+  const limit = API_LIMITS[plan] || API_LIMITS.free;
+
+  // 检查是否是新的一天，重置计数
+  let currentCalls = shop.apiCallsToday || 0;
+  const lastDate = shop.apiCallsDate ? new Date(shop.apiCallsDate).toISOString().split('T')[0] : null;
+
+  if (lastDate !== today) {
+    // 新的一天，重置计数
+    currentCalls = 0;
+  }
+
+  // 检查是否超过限额
+  if (currentCalls >= limit) {
+    return res.status(429).json({
+      error: 'API rate limit exceeded',
+      limit,
+      used: currentCalls,
+      plan,
+      resetsAt: new Date(new Date().setHours(24, 0, 0, 0)).toISOString()
+    });
+  }
+
+  // 更新计数（异步，不阻塞响应）
+  pool.query(`
+    UPDATE "Shop" SET
+      "apiCallsToday" = CASE WHEN "apiCallsDate" = $1::date THEN "apiCallsToday" + 1 ELSE 1 END,
+      "apiCallsDate" = $1::date
+    WHERE "id" = $2
+  `, [today, shop.id]).catch(e => console.error('[API Usage] Update error:', e.message));
+
+  // 添加响应头显示限额信息
+  res.set('X-RateLimit-Limit', limit);
+  res.set('X-RateLimit-Remaining', Math.max(0, limit - currentCalls - 1));
+  res.set('X-RateLimit-Reset', new Date(new Date().setHours(24, 0, 0, 0)).toISOString());
+
   next();
 }
 
@@ -464,7 +518,44 @@ app.get('/api/storefront/recommendations', queryLimiter, async (req, res) => {
       return res.json({ productId: product_id, recommendations: [] });
     }
 
-    const shopId = shopResult.rows[0].id;
+    const shopData = shopResult.rows[0];
+    const shopId = shopData.id;
+
+    // API 限额检查
+    const today = new Date().toISOString().split('T')[0];
+    const plan = shopData.plan || 'free';
+    const apiLimit = API_LIMITS[plan] || API_LIMITS.free;
+    let currentCalls = shopData.apiCallsToday || 0;
+    const lastDate = shopData.apiCallsDate ? new Date(shopData.apiCallsDate).toISOString().split('T')[0] : null;
+
+    if (lastDate !== today) {
+      currentCalls = 0;
+    }
+
+    if (currentCalls >= apiLimit) {
+      res.header('Access-Control-Expose-Headers', 'X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset');
+      res.set('X-RateLimit-Limit', apiLimit);
+      res.set('X-RateLimit-Remaining', 0);
+      return res.status(429).json({
+        error: 'API rate limit exceeded',
+        limit: apiLimit,
+        used: currentCalls,
+        plan
+      });
+    }
+
+    // 更新 API 调用计数（异步）
+    pool.query(`
+      UPDATE "Shop" SET
+        "apiCallsToday" = CASE WHEN "apiCallsDate" = $1::date THEN "apiCallsToday" + 1 ELSE 1 END,
+        "apiCallsDate" = $1::date
+      WHERE "id" = $2
+    `, [today, shopId]).catch(e => console.error('[API Usage] Error:', e.message));
+
+    // 添加限额响应头
+    res.header('Access-Control-Expose-Headers', 'X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset');
+    res.set('X-RateLimit-Limit', apiLimit);
+    res.set('X-RateLimit-Remaining', Math.max(0, apiLimit - currentCalls - 1));
 
     // 查找商品
     const srcRes = await pool.query(
@@ -519,6 +610,17 @@ app.get('/api/shops/sync-status', auth, async (req, res) => {
       [shop.id]
     );
 
+    // Calculate API usage
+    const today = new Date().toISOString().split('T')[0];
+    const plan = shop.plan || 'free';
+    const apiLimit = API_LIMITS[plan] || API_LIMITS.free;
+    let apiCallsToday = shop.apiCallsToday || 0;
+    const lastDate = shop.apiCallsDate ? new Date(shop.apiCallsDate).toISOString().split('T')[0] : null;
+
+    if (lastDate !== today) {
+      apiCallsToday = 0; // Reset for new day
+    }
+
     res.json({
       success: true,
       syncStatus: {
@@ -529,7 +631,15 @@ app.get('/api/shops/sync-status', auth, async (req, res) => {
         plan: shop.plan || 'free',
         canRefresh: refreshStatus.allowed,
         nextRefreshAt: refreshStatus.nextRefreshAt,
-        daysUntilRefresh: refreshStatus.daysRemaining
+        daysUntilRefresh: refreshStatus.daysRemaining,
+        // API usage
+        apiUsage: {
+          used: apiCallsToday,
+          limit: apiLimit,
+          remaining: Math.max(0, apiLimit - apiCallsToday),
+          percentage: Math.min(100, Math.round((apiCallsToday / apiLimit) * 100)),
+          resetsAt: new Date(new Date().setHours(24, 0, 0, 0)).toISOString()
+        }
       }
     });
   } catch (e) {
@@ -633,7 +743,7 @@ app.delete('/api/products', auth, async (req, res) => {
   }
 });
 
-app.get('/api/recommendations/:productId', queryLimiter, auth, async (req, res) => {
+app.get('/api/recommendations/:productId', queryLimiter, auth, trackApiUsage, async (req, res) => {
   try {
     const shopId = req.shop.id;
     const { productId } = req.params;
@@ -737,6 +847,10 @@ app.put('/api/shops/:domain/plan', async (req, res) => {
     if (lastRefreshAt !== undefined) {
       updates.push(`"lastRefreshAt" = $${paramIndex++}`);
       values.push(lastRefreshAt);
+    }
+    if (req.body.apiCallsToday !== undefined) {
+      updates.push(`"apiCallsToday" = $${paramIndex++}`);
+      values.push(req.body.apiCallsToday);
     }
 
     if (updates.length === 0) {
