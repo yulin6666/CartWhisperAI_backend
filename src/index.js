@@ -55,6 +55,28 @@ async function initDatabase() {
     `);
     await client.query(`CREATE INDEX IF NOT EXISTS "Rec_sourceId_idx" ON "Recommendation"("sourceId")`);
 
+    // Migration: Add new columns to existing tables
+    const addColumn = async (table, column, type, defaultVal) => {
+      try {
+        const def = defaultVal !== undefined ? ` DEFAULT ${defaultVal}` : '';
+        await client.query(`ALTER TABLE "${table}" ADD COLUMN IF NOT EXISTS "${column}" ${type}${def}`);
+      } catch (e) { /* Column might exist */ }
+    };
+
+    // Shop table migrations
+    await addColumn('Shop', 'plan', 'TEXT', "'free'");
+    await addColumn('Shop', 'shopifySubscriptionId', 'TEXT', null);
+    await addColumn('Shop', 'billingStatus', 'TEXT', "'active'");
+    await addColumn('Shop', 'subscriptionStartedAt', 'TIMESTAMP', null);
+    await addColumn('Shop', 'subscriptionEndsAt', 'TIMESTAMP', null);
+    await addColumn('Shop', 'updatedAt', 'TIMESTAMP', null);
+    // Sync tracking
+    await addColumn('Shop', 'initialSyncDone', 'BOOLEAN', 'false');
+    await addColumn('Shop', 'lastRefreshAt', 'TIMESTAMP', null);
+    await addColumn('Shop', 'productCount', 'INTEGER', '0');
+
+    await client.query(`CREATE INDEX IF NOT EXISTS "Shop_plan_idx" ON "Shop"("plan")`);
+
     console.log('[DB] Ready');
   } finally {
     client.release();
@@ -251,14 +273,63 @@ app.get('/api/health', async (req, res) => {
   }
 });
 
+// Helper: Check refresh rate limit
+function canRefresh(shop) {
+  if (!shop.lastRefreshAt) return { allowed: true };
+
+  const lastRefresh = new Date(shop.lastRefreshAt);
+  const now = new Date();
+  const daysSinceRefresh = (now - lastRefresh) / (1000 * 60 * 60 * 24);
+
+  const plan = shop.plan || 'free';
+  const limitDays = plan === 'pro' ? 7 : 30; // Pro: 7 days, Free: 30 days
+
+  if (daysSinceRefresh < limitDays) {
+    const nextRefreshDate = new Date(lastRefresh.getTime() + limitDays * 24 * 60 * 60 * 1000);
+    return {
+      allowed: false,
+      nextRefreshAt: nextRefreshDate.toISOString(),
+      daysRemaining: Math.ceil(limitDays - daysSinceRefresh)
+    };
+  }
+  return { allowed: true };
+}
+
 app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
   const client = await pool.connect();
   try {
-    const { products, regenerate } = req.body; // regenerate=true 强制重新生成所有推荐
+    // mode: 'auto' (default), 'refresh' (force regenerate all)
+    const { products, regenerate, mode = 'auto' } = req.body;
     if (!Array.isArray(products) || !products.length) return res.status(400).json({ error: 'Products required' });
 
     const shopId = req.shop.id;
-    console.log(`[Sync] ${req.shop.domain}: ${products.length} products, regenerate=${!!regenerate}`);
+    const shop = req.shop;
+    const isFirstSync = !shop.initialSyncDone;
+
+    // Check refresh rate limit for manual refresh
+    if (mode === 'refresh' || regenerate) {
+      const refreshCheck = canRefresh(shop);
+      if (!refreshCheck.allowed) {
+        return res.status(429).json({
+          error: 'Refresh rate limit exceeded',
+          nextRefreshAt: refreshCheck.nextRefreshAt,
+          daysRemaining: refreshCheck.daysRemaining,
+          plan: shop.plan || 'free'
+        });
+      }
+    }
+
+    // Determine actual mode
+    let actualMode = mode;
+    if (isFirstSync) {
+      actualMode = 'initial';
+    } else if (mode === 'refresh' || regenerate) {
+      actualMode = 'refresh';
+    } else {
+      actualMode = 'incremental';
+    }
+
+    console.log(`[Sync] ${shop.domain}: ${products.length} products, mode=${actualMode}, isFirstSync=${isFirstSync}`);
 
     const saved = [];
     for (const p of products) {
@@ -277,20 +348,24 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
       saved.push(result.rows[0]);
     }
 
-    // 找出没有推荐的商品
+    // Determine which products need recommendations based on mode
     let productsNeedingRecs = saved;
-    if (!regenerate) {
+    if (actualMode === 'refresh') {
+      // Refresh mode: delete all and regenerate
+      await client.query('DELETE FROM "Recommendation" WHERE "shopId" = $1', [shopId]);
+      console.log(`[Sync] Refresh mode: Regenerating all recommendations...`);
+    } else if (actualMode === 'incremental') {
+      // Incremental mode: only new products
       const existingRecs = await client.query(
         'SELECT DISTINCT "sourceId" FROM "Recommendation" WHERE "shopId" = $1',
         [shopId]
       );
       const existingSourceIds = new Set(existingRecs.rows.map(r => r.sourceId));
       productsNeedingRecs = saved.filter(p => !existingSourceIds.has(p.id));
-      console.log(`[Sync] ${productsNeedingRecs.length} products need new recommendations`);
+      console.log(`[Sync] Incremental mode: ${productsNeedingRecs.length} new products need recommendations`);
     } else {
-      // 如果强制重新生成，先删除所有旧推荐
-      await client.query('DELETE FROM "Recommendation" WHERE "shopId" = $1', [shopId]);
-      console.log(`[Sync] Regenerating all recommendations...`);
+      // Initial mode: generate for all
+      console.log(`[Sync] Initial mode: Generating recommendations for all ${saved.length} products...`);
     }
 
     let count = 0;
@@ -316,13 +391,48 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
     // 获取总推荐数
     const totalRecs = await client.query('SELECT COUNT(*) FROM "Recommendation" WHERE "shopId" = $1', [shopId]);
 
-    console.log(`[Sync] Done: ${saved.length} products, ${count} new recommendations, ${totalRecs.rows[0].count} total`);
+    // Update shop sync tracking
+    const updateFields = {
+      productCount: saved.length,
+      updatedAt: new Date()
+    };
+
+    if (actualMode === 'initial') {
+      updateFields.initialSyncDone = true;
+      updateFields.lastRefreshAt = new Date();
+    } else if (actualMode === 'refresh') {
+      updateFields.lastRefreshAt = new Date();
+    }
+
+    await client.query(`
+      UPDATE "Shop" SET
+        "productCount" = $1,
+        "updatedAt" = $2,
+        "initialSyncDone" = COALESCE($3, "initialSyncDone"),
+        "lastRefreshAt" = COALESCE($4, "lastRefreshAt")
+      WHERE "id" = $5
+    `, [
+      updateFields.productCount,
+      updateFields.updatedAt,
+      updateFields.initialSyncDone || null,
+      updateFields.lastRefreshAt || null,
+      shopId
+    ]);
+
+    console.log(`[Sync] Done: ${saved.length} products, ${count} new recommendations, ${totalRecs.rows[0].count} total, mode=${actualMode}`);
     cache.clear();
+
+    // Calculate next refresh time
+    const refreshCheck = canRefresh({ ...shop, lastRefreshAt: updateFields.lastRefreshAt || shop.lastRefreshAt });
+
     res.json({
       success: true,
+      mode: actualMode,
       products: saved.length,
       newRecommendations: count,
-      totalRecommendations: parseInt(totalRecs.rows[0].count)
+      totalRecommendations: parseInt(totalRecs.rows[0].count),
+      nextRefreshAt: refreshCheck.nextRefreshAt,
+      canRefresh: refreshCheck.allowed
     });
   } catch (e) {
     console.error('[Sync] Error:', e);
@@ -392,6 +502,41 @@ app.get('/api/storefront/recommendations', queryLimiter, async (req, res) => {
 });
 
 // ============ 管理 API ============
+
+// 获取商店同步状态
+app.get('/api/shops/sync-status', auth, async (req, res) => {
+  try {
+    const shop = req.shop;
+    const refreshStatus = canRefresh(shop);
+
+    // Get product and recommendation counts
+    const productCount = await pool.query(
+      'SELECT COUNT(*) FROM "Product" WHERE "shopId" = $1',
+      [shop.id]
+    );
+    const recCount = await pool.query(
+      'SELECT COUNT(*) FROM "Recommendation" WHERE "shopId" = $1',
+      [shop.id]
+    );
+
+    res.json({
+      success: true,
+      syncStatus: {
+        initialSyncDone: shop.initialSyncDone || false,
+        lastRefreshAt: shop.lastRefreshAt,
+        productCount: parseInt(productCount.rows[0].count),
+        recommendationCount: parseInt(recCount.rows[0].count),
+        plan: shop.plan || 'free',
+        canRefresh: refreshStatus.allowed,
+        nextRefreshAt: refreshStatus.nextRefreshAt,
+        daysUntilRefresh: refreshStatus.daysRemaining
+      }
+    });
+  } catch (e) {
+    console.error('[SyncStatus] Error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
 
 // 查询商店的所有推荐
 app.get('/api/recommendations', queryLimiter, auth, async (req, res) => {
@@ -528,6 +673,120 @@ app.get('/api/recommendations/:productId', queryLimiter, auth, async (req, res) 
     res.json(data);
   } catch (e) {
     console.error('[Query] Error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ============ Shop Plan Management ============
+
+// Get shop plan info
+app.get('/api/shops/:domain/plan', async (req, res) => {
+  try {
+    const domain = req.params.domain.replace(/^https?:\/\//, '').replace(/\/$/, '');
+    const result = await pool.query(
+      'SELECT "plan", "shopifySubscriptionId", "billingStatus", "initialSyncDone", "lastRefreshAt", "productCount" FROM "Shop" WHERE "domain" = $1',
+      [domain]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Shop not found' });
+    }
+
+    const shop = result.rows[0];
+    const refreshStatus = canRefresh(shop);
+
+    res.json({
+      plan: shop.plan || 'free',
+      shopifySubscriptionId: shop.shopifySubscriptionId,
+      billingStatus: shop.billingStatus || 'active',
+      initialSyncDone: shop.initialSyncDone || false,
+      lastRefreshAt: shop.lastRefreshAt,
+      productCount: shop.productCount || 0,
+      canRefresh: refreshStatus.allowed,
+      nextRefreshAt: refreshStatus.nextRefreshAt
+    });
+  } catch (e) {
+    console.error('[Plan] Error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Update shop plan (for testing/admin)
+app.put('/api/shops/:domain/plan', async (req, res) => {
+  try {
+    const domain = req.params.domain.replace(/^https?:\/\//, '').replace(/\/$/, '');
+    const { plan, shopifySubscriptionId, billingStatus, lastRefreshAt } = req.body;
+
+    // Build dynamic update query
+    const updates = [];
+    const values = [];
+    let paramIndex = 1;
+
+    if (plan !== undefined) {
+      updates.push(`"plan" = $${paramIndex++}`);
+      values.push(plan);
+    }
+    if (shopifySubscriptionId !== undefined) {
+      updates.push(`"shopifySubscriptionId" = $${paramIndex++}`);
+      values.push(shopifySubscriptionId);
+    }
+    if (billingStatus !== undefined) {
+      updates.push(`"billingStatus" = $${paramIndex++}`);
+      values.push(billingStatus);
+    }
+    if (lastRefreshAt !== undefined) {
+      updates.push(`"lastRefreshAt" = $${paramIndex++}`);
+      values.push(lastRefreshAt);
+    }
+
+    if (updates.length === 0) {
+      return res.status(400).json({ error: 'No fields to update' });
+    }
+
+    updates.push(`"updatedAt" = NOW()`);
+    values.push(domain);
+
+    const query = `UPDATE "Shop" SET ${updates.join(', ')} WHERE "domain" = $${paramIndex} RETURNING *`;
+    const result = await pool.query(query, values);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Shop not found' });
+    }
+
+    console.log(`[Plan] Updated ${domain}: ${JSON.stringify(req.body)}`);
+    res.json({
+      success: true,
+      ...result.rows[0]
+    });
+  } catch (e) {
+    console.error('[Plan] Error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Cancel subscription
+app.post('/api/shops/:domain/cancel-subscription', async (req, res) => {
+  try {
+    const domain = req.params.domain.replace(/^https?:\/\//, '').replace(/\/$/, '');
+
+    const result = await pool.query(`
+      UPDATE "Shop" SET
+        "plan" = 'free',
+        "shopifySubscriptionId" = NULL,
+        "billingStatus" = 'cancelled',
+        "updatedAt" = NOW()
+      WHERE "domain" = $1
+      RETURNING *
+    `, [domain]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Shop not found' });
+    }
+
+    console.log(`[Plan] Cancelled subscription for ${domain}`);
+    res.json({ success: true, plan: 'free' });
+  } catch (e) {
+    console.error('[Plan] Error:', e);
     res.status(500).json({ error: e.message });
   }
 });
