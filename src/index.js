@@ -78,6 +78,10 @@ async function initDatabase() {
     await addColumn('Shop', 'apiCallsToday', 'INTEGER', '0');
     await addColumn('Shop', 'apiCallsDate', 'DATE', null);
 
+    // Recommendation tracking (impressions/clicks)
+    await addColumn('Recommendation', 'impressions', 'INTEGER', '0');
+    await addColumn('Recommendation', 'clicks', 'INTEGER', '0');
+
     await client.query(`CREATE INDEX IF NOT EXISTS "Shop_plan_idx" ON "Shop"("plan")`);
 
     console.log('[DB] Ready');
@@ -874,6 +878,218 @@ app.put('/api/shops/:domain/plan', async (req, res) => {
     });
   } catch (e) {
     console.error('[Plan] Error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ============ Tracking API ============
+
+// Record impression (when recommendation is shown)
+app.post('/api/tracking/impression', async (req, res) => {
+  // CORS 头
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, X-Shop-Domain');
+
+  try {
+    const { shop, sourceProductId, targetProductIds } = req.body;
+    if (!shop || !sourceProductId || !targetProductIds) {
+      return res.status(400).json({ error: 'Missing required fields: shop, sourceProductId, targetProductIds' });
+    }
+
+    const cleanDomain = shop.replace(/^https?:\/\//, '').replace(/\/$/, '');
+    const shopResult = await pool.query('SELECT * FROM "Shop" WHERE "domain" = $1', [cleanDomain]);
+    if (shopResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Shop not found' });
+    }
+
+    const shopId = shopResult.rows[0].id;
+
+    // Find source product
+    const srcRes = await pool.query(
+      'SELECT * FROM "Product" WHERE "shopId" = $1 AND "productId" = $2',
+      [shopId, sourceProductId]
+    );
+    if (!srcRes.rows.length) {
+      return res.status(404).json({ error: 'Source product not found' });
+    }
+
+    const sourceId = srcRes.rows[0].id;
+    const targetIds = Array.isArray(targetProductIds) ? targetProductIds : [targetProductIds];
+
+    // Update impression counts for each recommendation
+    let updated = 0;
+    for (const targetProductId of targetIds) {
+      const result = await pool.query(`
+        UPDATE "Recommendation" r
+        SET "impressions" = COALESCE("impressions", 0) + 1
+        FROM "Product" p
+        WHERE r."shopId" = $1 AND r."sourceId" = $2 AND r."targetId" = p."id" AND p."productId" = $3
+      `, [shopId, sourceId, targetProductId]);
+      updated += result.rowCount;
+    }
+
+    res.json({ success: true, updated });
+  } catch (e) {
+    console.error('[Tracking] Impression error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Record click (when recommendation is clicked)
+app.post('/api/tracking/click', async (req, res) => {
+  // CORS 头
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, X-Shop-Domain');
+
+  try {
+    const { shop, sourceProductId, targetProductId } = req.body;
+    if (!shop || !sourceProductId || !targetProductId) {
+      return res.status(400).json({ error: 'Missing required fields: shop, sourceProductId, targetProductId' });
+    }
+
+    const cleanDomain = shop.replace(/^https?:\/\//, '').replace(/\/$/, '');
+    const shopResult = await pool.query('SELECT * FROM "Shop" WHERE "domain" = $1', [cleanDomain]);
+    if (shopResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Shop not found' });
+    }
+
+    const shopId = shopResult.rows[0].id;
+
+    // Find source product
+    const srcRes = await pool.query(
+      'SELECT * FROM "Product" WHERE "shopId" = $1 AND "productId" = $2',
+      [shopId, sourceProductId]
+    );
+    if (!srcRes.rows.length) {
+      return res.status(404).json({ error: 'Source product not found' });
+    }
+
+    const sourceId = srcRes.rows[0].id;
+
+    // Update click count
+    const result = await pool.query(`
+      UPDATE "Recommendation" r
+      SET "clicks" = COALESCE("clicks", 0) + 1
+      FROM "Product" p
+      WHERE r."shopId" = $1 AND r."sourceId" = $2 AND r."targetId" = p."id" AND p."productId" = $3
+    `, [shopId, sourceId, targetProductId]);
+
+    res.json({ success: true, updated: result.rowCount });
+  } catch (e) {
+    console.error('[Tracking] Click error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// OPTIONS handler for CORS preflight
+app.options('/api/tracking/impression', (req, res) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, X-Shop-Domain');
+  res.sendStatus(204);
+});
+
+app.options('/api/tracking/click', (req, res) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, X-Shop-Domain');
+  res.sendStatus(204);
+});
+
+// Get statistics
+app.get('/api/statistics', auth, async (req, res) => {
+  try {
+    const shopId = req.shop.id;
+
+    // Total impressions and clicks
+    const totals = await pool.query(`
+      SELECT
+        COALESCE(SUM("impressions"), 0) as "totalImpressions",
+        COALESCE(SUM("clicks"), 0) as "totalClicks"
+      FROM "Recommendation"
+      WHERE "shopId" = $1
+    `, [shopId]);
+
+    const totalImpressions = parseInt(totals.rows[0].totalImpressions);
+    const totalClicks = parseInt(totals.rows[0].totalClicks);
+    const ctr = totalImpressions > 0 ? (totalClicks / totalImpressions * 100).toFixed(2) : 0;
+
+    // Top performing recommendations (by CTR, min 10 impressions)
+    const topByCtR = await pool.query(`
+      SELECT
+        sp."productId" as "sourceProductId",
+        sp."title" as "sourceTitle",
+        tp."productId" as "targetProductId",
+        tp."title" as "targetTitle",
+        r."impressions",
+        r."clicks",
+        CASE WHEN r."impressions" > 0 THEN ROUND((r."clicks"::float / r."impressions" * 100)::numeric, 2) ELSE 0 END as "ctr"
+      FROM "Recommendation" r
+      JOIN "Product" sp ON r."sourceId" = sp."id"
+      JOIN "Product" tp ON r."targetId" = tp."id"
+      WHERE r."shopId" = $1 AND r."impressions" >= 10
+      ORDER BY "ctr" DESC, r."clicks" DESC
+      LIMIT 10
+    `, [shopId]);
+
+    // Top by clicks
+    const topByClicks = await pool.query(`
+      SELECT
+        sp."productId" as "sourceProductId",
+        sp."title" as "sourceTitle",
+        tp."productId" as "targetProductId",
+        tp."title" as "targetTitle",
+        r."impressions",
+        r."clicks",
+        CASE WHEN r."impressions" > 0 THEN ROUND((r."clicks"::float / r."impressions" * 100)::numeric, 2) ELSE 0 END as "ctr"
+      FROM "Recommendation" r
+      JOIN "Product" sp ON r."sourceId" = sp."id"
+      JOIN "Product" tp ON r."targetId" = tp."id"
+      WHERE r."shopId" = $1 AND r."clicks" > 0
+      ORDER BY r."clicks" DESC
+      LIMIT 10
+    `, [shopId]);
+
+    // Products with most impressions (source products)
+    const topSourceProducts = await pool.query(`
+      SELECT
+        sp."productId",
+        sp."title",
+        sp."image",
+        SUM(r."impressions") as "impressions",
+        SUM(r."clicks") as "clicks",
+        CASE WHEN SUM(r."impressions") > 0 THEN ROUND((SUM(r."clicks")::float / SUM(r."impressions") * 100)::numeric, 2) ELSE 0 END as "ctr"
+      FROM "Recommendation" r
+      JOIN "Product" sp ON r."sourceId" = sp."id"
+      WHERE r."shopId" = $1
+      GROUP BY sp."id", sp."productId", sp."title", sp."image"
+      HAVING SUM(r."impressions") > 0
+      ORDER BY "impressions" DESC
+      LIMIT 10
+    `, [shopId]);
+
+    res.json({
+      success: true,
+      statistics: {
+        summary: {
+          totalImpressions,
+          totalClicks,
+          ctr: parseFloat(ctr)
+        },
+        topByCtr: topByCtR.rows,
+        topByClicks: topByClicks.rows,
+        topSourceProducts: topSourceProducts.rows.map(r => ({
+          ...r,
+          impressions: parseInt(r.impressions),
+          clicks: parseInt(r.clicks),
+          ctr: parseFloat(r.ctr)
+        }))
+      }
+    });
+  } catch (e) {
+    console.error('[Statistics] Error:', e);
     res.status(500).json({ error: e.message });
   }
 });
