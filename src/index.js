@@ -791,6 +791,117 @@ app.get('/api/recommendations/:productId', queryLimiter, auth, trackApiUsage, as
   }
 });
 
+// Public recommendations endpoint (for storefront without App Proxy)
+// This endpoint looks up the shop by domain and returns recommendations
+app.get('/api/public/recommendations/:shop/:productId', queryLimiter, async (req, res) => {
+  // CORS headers for storefront access
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type');
+
+  try {
+    const { shop: shopDomain, productId } = req.params;
+    const limit = Math.min(parseInt(req.query.limit) || 3, 10);
+
+    // Clean the domain
+    const cleanDomain = shopDomain.replace(/^https?:\/\//, '').replace(/\/$/, '');
+    console.log('[Public Recommendations] Request:', { shop: cleanDomain, productId, limit });
+
+    // Find shop by domain
+    const shopResult = await pool.query('SELECT * FROM "Shop" WHERE "domain" = $1', [cleanDomain]);
+    if (shopResult.rows.length === 0) {
+      console.log('[Public Recommendations] Shop not found:', cleanDomain);
+      return res.status(404).json({ error: 'Shop not found', productId, recommendations: [] });
+    }
+
+    const shop = shopResult.rows[0];
+    const shopId = shop.id;
+
+    // Check API usage (but don't block, just track)
+    const today = new Date().toISOString().split('T')[0];
+    const plan = shop.plan || 'free';
+    const apiLimit = API_LIMITS[plan] || API_LIMITS.free;
+    let currentCalls = shop.apiCallsToday || 0;
+    const lastDate = shop.apiCallsDate ? new Date(shop.apiCallsDate).toISOString().split('T')[0] : null;
+    if (lastDate !== today) currentCalls = 0;
+
+    if (currentCalls >= apiLimit) {
+      console.log('[Public Recommendations] Rate limit exceeded for shop:', cleanDomain);
+      return res.status(429).json({
+        error: 'API rate limit exceeded',
+        productId,
+        recommendations: []
+      });
+    }
+
+    // Update API usage
+    pool.query(`
+      UPDATE "Shop" SET
+        "apiCallsToday" = CASE WHEN "apiCallsDate" = $1::date THEN "apiCallsToday" + 1 ELSE 1 END,
+        "apiCallsDate" = $1::date
+      WHERE "id" = $2
+    `, [today, shopId]).catch(e => console.error('[Public Recommendations] Update error:', e.message));
+
+    // Cache check
+    const cacheKey = `public:${shopId}:${productId}:${limit}`;
+    const cached = cache.get(cacheKey);
+    if (cached && Date.now() < cached.expiry) {
+      console.log('[Public Recommendations] Cache hit');
+      return res.json(cached.data);
+    }
+
+    // Find source product
+    const srcRes = await pool.query(
+      'SELECT * FROM "Product" WHERE "shopId" = $1 AND ("productId" = $2 OR "handle" = $2)',
+      [shopId, productId]
+    );
+    if (!srcRes.rows.length) {
+      console.log('[Public Recommendations] Product not found:', productId);
+      return res.json({ productId, recommendations: [] });
+    }
+
+    // Get recommendations
+    const recs = await pool.query(`
+      SELECT r.*, p."productId", p."handle", p."title", p."price", p."image"
+      FROM "Recommendation" r
+      JOIN "Product" p ON r."targetId" = p."id"
+      WHERE r."shopId" = $1 AND r."sourceId" = $2
+      LIMIT $3
+    `, [shopId, srcRes.rows[0].id, limit]);
+
+    const data = {
+      success: true,
+      productId,
+      shop: cleanDomain,
+      count: recs.rows.length,
+      recommendations: recs.rows.map(r => ({
+        id: `gid://shopify/Product/${r.productId}`,
+        numericId: r.productId,
+        handle: r.handle,
+        title: r.title,
+        price: r.price,
+        image: r.image,
+        reasoning: r.reason
+      }))
+    };
+
+    cache.set(cacheKey, { data, expiry: Date.now() + CACHE_TTL });
+    console.log('[Public Recommendations] Returning', recs.rows.length, 'recommendations');
+    res.json(data);
+  } catch (e) {
+    console.error('[Public Recommendations] Error:', e);
+    res.status(500).json({ error: e.message, recommendations: [] });
+  }
+});
+
+// OPTIONS handler for public recommendations
+app.options('/api/public/recommendations/:shop/:productId', (req, res) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type');
+  res.sendStatus(204);
+});
+
 // ============ Shop Plan Management ============
 
 // Get shop plan info
