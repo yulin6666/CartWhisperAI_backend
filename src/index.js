@@ -893,6 +893,8 @@ app.post('/api/tracking/impression', async (req, res) => {
 
   try {
     const { shop, sourceProductId, targetProductIds } = req.body;
+    console.log('[Tracking] Impression request:', { shop, sourceProductId, targetProductIds });
+
     if (!shop || !sourceProductId || !targetProductIds) {
       return res.status(400).json({ error: 'Missing required fields: shop, sourceProductId, targetProductIds' });
     }
@@ -900,18 +902,22 @@ app.post('/api/tracking/impression', async (req, res) => {
     const cleanDomain = shop.replace(/^https?:\/\//, '').replace(/\/$/, '');
     const shopResult = await pool.query('SELECT * FROM "Shop" WHERE "domain" = $1', [cleanDomain]);
     if (shopResult.rows.length === 0) {
+      console.log('[Tracking] Shop not found:', cleanDomain);
       return res.status(404).json({ error: 'Shop not found' });
     }
 
     const shopId = shopResult.rows[0].id;
 
-    // Find source product
+    // Find source product (strip gid prefix if present)
+    const cleanSourceId = String(sourceProductId).replace('gid://shopify/Product/', '');
     const srcRes = await pool.query(
       'SELECT * FROM "Product" WHERE "shopId" = $1 AND "productId" = $2',
-      [shopId, sourceProductId]
+      [shopId, cleanSourceId]
     );
+    console.log('[Tracking] Source product lookup:', { cleanSourceId, found: srcRes.rows.length });
+
     if (!srcRes.rows.length) {
-      return res.status(404).json({ error: 'Source product not found' });
+      return res.status(404).json({ error: 'Source product not found', sourceProductId: cleanSourceId });
     }
 
     const sourceId = srcRes.rows[0].id;
@@ -920,15 +926,17 @@ app.post('/api/tracking/impression', async (req, res) => {
     // Update impression counts for each recommendation
     let updated = 0;
     for (const targetProductId of targetIds) {
+      const cleanTargetId = String(targetProductId).replace('gid://shopify/Product/', '');
       const result = await pool.query(`
         UPDATE "Recommendation" r
         SET "impressions" = COALESCE("impressions", 0) + 1
         FROM "Product" p
         WHERE r."shopId" = $1 AND r."sourceId" = $2 AND r."targetId" = p."id" AND p."productId" = $3
-      `, [shopId, sourceId, targetProductId]);
+      `, [shopId, sourceId, cleanTargetId]);
       updated += result.rowCount;
     }
 
+    console.log('[Tracking] Impressions updated:', { updated });
     res.json({ success: true, updated });
   } catch (e) {
     console.error('[Tracking] Impression error:', e);
@@ -945,6 +953,8 @@ app.post('/api/tracking/click', async (req, res) => {
 
   try {
     const { shop, sourceProductId, targetProductId } = req.body;
+    console.log('[Tracking] Click request:', { shop, sourceProductId, targetProductId });
+
     if (!shop || !sourceProductId || !targetProductId) {
       return res.status(400).json({ error: 'Missing required fields: shop, sourceProductId, targetProductId' });
     }
@@ -952,21 +962,29 @@ app.post('/api/tracking/click', async (req, res) => {
     const cleanDomain = shop.replace(/^https?:\/\//, '').replace(/\/$/, '');
     const shopResult = await pool.query('SELECT * FROM "Shop" WHERE "domain" = $1', [cleanDomain]);
     if (shopResult.rows.length === 0) {
+      console.log('[Tracking] Shop not found:', cleanDomain);
       return res.status(404).json({ error: 'Shop not found' });
     }
 
     const shopId = shopResult.rows[0].id;
 
-    // Find source product
+    // Find source product (try both with and without prefix stripping)
+    const cleanSourceId = String(sourceProductId).replace('gid://shopify/Product/', '');
     const srcRes = await pool.query(
       'SELECT * FROM "Product" WHERE "shopId" = $1 AND "productId" = $2',
-      [shopId, sourceProductId]
+      [shopId, cleanSourceId]
     );
+    console.log('[Tracking] Source product lookup:', { cleanSourceId, found: srcRes.rows.length });
+
     if (!srcRes.rows.length) {
-      return res.status(404).json({ error: 'Source product not found' });
+      return res.status(404).json({ error: 'Source product not found', sourceProductId: cleanSourceId });
     }
 
     const sourceId = srcRes.rows[0].id;
+
+    // Find target product
+    const cleanTargetId = String(targetProductId).replace('gid://shopify/Product/', '');
+    console.log('[Tracking] Looking for target:', { cleanTargetId });
 
     // Update click count
     const result = await pool.query(`
@@ -974,8 +992,9 @@ app.post('/api/tracking/click', async (req, res) => {
       SET "clicks" = COALESCE("clicks", 0) + 1
       FROM "Product" p
       WHERE r."shopId" = $1 AND r."sourceId" = $2 AND r."targetId" = p."id" AND p."productId" = $3
-    `, [shopId, sourceId, targetProductId]);
+    `, [shopId, sourceId, cleanTargetId]);
 
+    console.log('[Tracking] Click updated:', { rowCount: result.rowCount });
     res.json({ success: true, updated: result.rowCount });
   } catch (e) {
     console.error('[Tracking] Click error:', e);
