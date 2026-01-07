@@ -234,7 +234,12 @@ async function generateRecommendations(products, allProducts = null) {
 价格: ¥${product.price}
 
 可选搭配商品:
-${others.map((p, i) => `${i + 1}. ID:${p.productId} ${p.title} (¥${p.price})`).join('\n')}
+${others.map((p, i) => `${i + 1}. ID:${p.productId} ${p.title} 类型:${p.productType || '未知'} (¥${p.price})`).join('\n')}
+
+重要规则:
+1. 场景必须匹配：睡衣/居家服只能搭配居家用品(拖鞋、眼罩、居家配饰)，绝对不能推荐外出服装(裙子、牛仔裤、外套)
+2. 推荐配饰优先：优先推荐配饰(耳环、项链、包包、鞋子)，因为它们与服装搭配更合理
+3. 避免功能冲突：上衣不推荐上衣，裤子不推荐裤子，裙子不推荐裤子
 
 请返回JSON格式，包含3个推荐。每个推荐需要包含:
 - productId: 推荐商品的ID
