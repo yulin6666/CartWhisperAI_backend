@@ -291,6 +291,7 @@
                   id: sourceId,
                   title: rec.sourceTitle || `Product ${sourceId}`,
                   image: rec.sourceImage,
+                  price: rec.sourcePrice,
                   recommendations: []
                 });
               }
@@ -335,6 +336,7 @@
                  onerror="this.src='https://via.placeholder.com/80?text=No+Image'" />
             <div class="product-info">
               <div class="product-title">${product.title}</div>
+              <div class="product-price">${product.price ? '$' + product.price : ''}</div>
               <div class="product-id">ID: ${product.id}</div>
               <div class="product-meta">${product.recommendations.length} 条推荐</div>
             </div>

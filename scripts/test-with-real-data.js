@@ -308,6 +308,34 @@ async function testRecommendations(domain, dataFile) {
   }
 }
 
+// 重置商店数据（删除所有商品和推荐）
+async function resetShop(apiKey) {
+  log(`\n🗑️  Resetting shop data...`, 'cyan');
+
+  try {
+    const response = await fetch(`${BACKEND_URL}/api/products`, {
+      method: 'DELETE',
+      headers: {
+        'X-API-Key': apiKey,
+      },
+    });
+
+    const data = await response.json();
+
+    if (response.ok && data.success) {
+      const products = data.deleted?.products || 0;
+      const recommendations = data.deleted?.recommendations || 0;
+      log(`✅ Deleted ${products} products and ${recommendations} recommendations`, 'green');
+      return true;
+    } else {
+      throw new Error(data.error || 'Reset failed');
+    }
+  } catch (error) {
+    log(`❌ Error: ${error.message}`, 'red');
+    return false;
+  }
+}
+
 // 负载测试
 async function loadTest(domain, concurrency = 10, requests = 100) {
   log(`\n⚡ Load testing: ${concurrency} concurrent, ${requests} total requests`, 'cyan');
@@ -380,6 +408,9 @@ CartWhisper 测试工具
   import <file> <api-key>    导入产品数据
                              示例: node scripts/test-with-real-data.js import test-data/products.json sk_xxx
 
+  reset <api-key>            删除所有商品和推荐数据
+                             示例: node scripts/test-with-real-data.js reset cw_xxx
+
   test <domain>              测试推荐质量
                              设置 TEST_PRODUCT_IDS=id1,id2 来测试特定产品
 
@@ -436,6 +467,15 @@ async function main() {
       }
       const importLimit = parseInt(args.find(a => a.startsWith('--limit='))?.split('=')[1]) || 0;
       await importProducts(args[1], args[2], importLimit);
+      break;
+
+    case 'reset':
+      if (!args[1]) {
+        log('❌ Please provide API key', 'red');
+        log('Usage: reset <api-key>');
+        return;
+      }
+      await resetShop(args[1]);
       break;
 
     case 'test':

@@ -87,7 +87,30 @@ node scripts/test-with-real-data.js import test-data/products-gymshark-176760246
 
 ---
 
-### 4. 测试推荐质量
+### 4. 重置商店数据
+
+删除商店的所有商品和推荐数据：
+
+```bash
+node scripts/test-with-real-data.js reset <api-key>
+```
+
+**示例：**
+```bash
+node scripts/test-with-real-data.js reset cw_xxxxxxxx
+```
+
+**输出：**
+```
+🗑️  Resetting shop data...
+✅ Deleted 50 products and 150 recommendations
+```
+
+> ⚠️ 此操作不可逆，请谨慎使用。
+
+---
+
+### 5. 测试推荐质量
 
 测试推荐系统的质量：
 
@@ -121,7 +144,7 @@ Shop has 50 products
 
 ---
 
-### 5. 负载测试
+### 6. 负载测试
 
 测试 API 在并发情况下的性能：
 
@@ -193,6 +216,12 @@ node scripts/test-with-real-data.js test gymshark-test.myshopify.com test-data/p
 
 ```bash
 TEST_PRODUCT_ID=6715424833739 node scripts/test-with-real-data.js load gymshark-test.myshopify.com
+```
+
+### 步骤 6: 重置数据（可选）
+
+```bash
+node scripts/test-with-real-data.js reset cw_xxxxx
 ```
 
 ---
