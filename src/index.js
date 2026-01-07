@@ -215,37 +215,35 @@ async function generateRecommendations(products, allProducts = null) {
   const targetPool = allProducts || products;
   const results = [];
 
+  // 简化商品描述，提取关键信息
+  const summarize = (p) => {
+    const desc = (p.description || '').substring(0, 150).replace(/\s+/g, ' ');
+    return `${p.title} [${p.productType || '未分类'}] ${desc}`;
+  };
+
   for (const product of products) {
-    // 过滤：
-    // 1. 排除相同 ID 的产品
-    // 2. 排除同款产品（基于 handle）
-    // 3. 排除同类型的产品（基于 productType）- 不推荐同类商品
+    // 只排除同款和同ID，不做硬编码的类型过滤
     const others = targetPool.filter(p =>
       p.productId !== product.productId &&
-      !isSameProduct(product, p) &&
-      (product.productType || '').toLowerCase() !== (p.productType || '').toLowerCase()
+      !isSameProduct(product, p)
     );
     if (others.length === 0) continue;
 
-    const prompt = `你是电商推荐专家。请为以下商品推荐3个最佳搭配产品。
+    const prompt = `你是电商cross-sell推荐专家。请为以下商品推荐3个最佳搭配产品。
 
-商品: ${product.title}
-类型: ${product.productType || '未分类'}
+【源商品】
+${summarize(product)}
 价格: ¥${product.price}
 
-可选搭配商品:
-${others.map((p, i) => `${i + 1}. ID:${p.productId} ${p.title} 类型:${p.productType || '未知'} (¥${p.price})`).join('\n')}
+【候选商品】
+${others.map((p, i) => `${i + 1}. ID:${p.productId} | ${summarize(p)} | ¥${p.price}`).join('\n')}
 
-重要规则:
-1. 场景必须匹配：睡衣/居家服只能搭配居家用品(拖鞋、眼罩、居家配饰)，绝对不能推荐外出服装(裙子、牛仔裤、外套)
-2. 推荐配饰优先：优先推荐配饰(耳环、项链、包包、鞋子)，因为它们与服装搭配更合理
-3. 避免功能冲突：上衣不推荐上衣，裤子不推荐裤子，裙子不推荐裤子
+【推荐原则】
+1. 场景一致性：根据商品描述判断使用场景(居家/外出/运动/正式等)，只推荐场景兼容的商品
+2. 功能互补：推荐能与源商品搭配使用的商品(如上衣配裤子、服装配配饰)，避免功能重复
+3. 风格协调：材质、风格、价位应协调
 
-请返回JSON格式，包含3个推荐。每个推荐需要包含:
-- productId: 推荐商品的ID
-- reason: 推荐理由（中英双语，格式："中文理由|English reason"）
-
-只返回JSON，不要其他内容:
+请返回JSON，包含3个推荐:
 {"recommendations":[{"productId":"xxx","reason":"中文理由|English reason"}]}`;
 
     const aiRes = await callDeepSeek(prompt);
@@ -272,16 +270,19 @@ ${others.map((p, i) => `${i + 1}. ID:${p.productId} ${p.title} 类型:${p.produc
         console.error('[AI] Parse error:', e.message);
       }
     } else {
-      // Fallback: 推荐不同类型的商品（others 已经过滤了同类）
-      if (others.length > 0) {
-        others.slice(0, 3).forEach(t => {
-          results.push({
-            sourceId: product.productId,
-            targetId: t.productId,
-            reason: '完美搭配|Perfect match'
-          });
+      // Fallback: 优先推荐配饰类商品
+      const accessories = others.filter(p =>
+        (p.productType || '').toLowerCase().includes('accessor') ||
+        (p.productType || '').toLowerCase().includes('footwear')
+      );
+      const fallbackPool = accessories.length > 0 ? accessories : others;
+      fallbackPool.slice(0, 3).forEach(t => {
+        results.push({
+          sourceId: product.productId,
+          targetId: t.productId,
+          reason: '完美搭配|Perfect match'
         });
-      }
+      });
     }
     if (process.env.DEEPSEEK_API_KEY) await new Promise(r => setTimeout(r, 200));
   }
