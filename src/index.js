@@ -404,7 +404,7 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
         ON CONFLICT ("shopId", "productId") DO UPDATE SET
           "handle" = $4, "title" = $5, "description" = $6, "productType" = $7, "vendor" = $8, "price" = $9, "image" = $10, "tags" = $11
         RETURNING *
-      `, [id, shopId, productId, p.handle, p.title, p.description || null, p.productType || null, p.vendor || null, parseFloat(p.price) || 0, p.image?.url || null, p.tags || []]);
+      `, [id, shopId, productId, p.handle, p.title, p.description || null, p.productType || null, p.vendor || null, parseFloat(p.price) || 0, (typeof p.image === 'string' ? p.image : p.image?.url) || null, p.tags || []]);
 
       const result = await client.query('SELECT * FROM "Product" WHERE "shopId" = $1 AND "productId" = $2', [shopId, productId]);
       saved.push(result.rows[0]);
