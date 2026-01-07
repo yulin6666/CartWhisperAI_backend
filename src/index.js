@@ -217,8 +217,21 @@ async function generateRecommendations(products, allProducts = null) {
 
   // 简化商品描述，提取关键信息
   const summarize = (p) => {
-    const desc = (p.description || '').substring(0, 150).replace(/\s+/g, ' ');
-    return `${p.title} [${p.productType || '未分类'}] ${desc}`;
+    const desc = (p.description || '').substring(0, 100).replace(/\s+/g, ' ');
+    const title = p.title || '';
+    const type = p.productType || '未分类';
+    const tags = (p.tags || []).join(' ').toLowerCase();
+
+    // 识别性别（从 tags、productType、title 识别）
+    let gender = '';
+    const all = (title + ' ' + type + ' ' + desc + ' ' + tags).toLowerCase();
+    if (tags.match(/\bmens\b|filtergender:\s*mens/) || all.match(/\b(men'?s|male|boy)\b/) || type.toLowerCase().includes('mens')) {
+      gender = '[男士]';
+    } else if (tags.match(/\bwomens\b|filtergender:\s*womens/) || all.match(/\b(women'?s|female|girl|ladies)\b/) || title.match(/dress|skirt|bra/i)) {
+      gender = '[女士]';
+    }
+
+    return `${gender}${title} [${type}] ${desc}`;
   };
 
   for (const product of products) {
@@ -239,9 +252,10 @@ ${summarize(product)}
 ${others.map((p, i) => `${i + 1}. ID:${p.productId} | ${summarize(p)} | ¥${p.price}`).join('\n')}
 
 【核心规则 - 必须严格遵守】
-1. 禁止推荐同类商品：服装不能推荐服装！睡衣不推荐睡衣/套装，上衣不推荐上衣，裤子不推荐裤子，裙子不推荐裙子/连衣裙
-2. 优先推荐配饰：耳环、项链、手链、包包、帽子、袜子、拖鞋等配饰是最佳选择
-3. Cross-sell原则：推荐能与源商品"同时使用"的商品，而非"替代"源商品的商品
+1. 性别必须一致：[男士]商品只能推荐[男士]或中性商品，[女士]商品只能推荐[女士]或中性商品
+2. 禁止推荐同类：服装不推荐服装！上衣不推荐上衣，裤子不推荐裤子，裙子不推荐裙子
+3. 优先推荐配饰：耳环、项链、包包、帽子、袜子、鞋子等配饰是最佳选择
+4. 同时使用原则：推荐能与源商品一起穿戴的商品，而非替代品
 
 请返回JSON，包含3个推荐:
 {"recommendations":[{"productId":"xxx","reason":"中文理由|English reason"}]}`;
