@@ -4,6 +4,7 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const { Pool } = require('pg');
 const crypto = require('crypto');
+const path = require('path');
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const app = express();
@@ -92,9 +93,12 @@ async function initDatabase() {
 
 // Middleware
 app.set('trust proxy', 1);
-app.use(helmet());
+app.use(helmet({ contentSecurityPolicy: false })); // 允许内联脚本
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
+
+// 静态文件服务（测试面板）
+app.use(express.static(path.join(__dirname, '..', 'public')));
 
 const syncLimiter = rateLimit({ windowMs: 60000, max: 10 });
 const queryLimiter = rateLimit({ windowMs: 60000, max: 300 });

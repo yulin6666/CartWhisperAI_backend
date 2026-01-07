@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CartWhisper 测试面板</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #f5f5f5;
+      padding: 20px;
+    }
+    .header {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      padding: 20px;
+      border-radius: 12px;
+      margin-bottom: 20px;
+    }
+    .header h1 { font-size: 24px; margin-bottom: 10px; }
+    .header .stats { display: flex; gap: 20px; flex-wrap: wrap; }
+    .header .stat { background: rgba(255,255,255,0.2); padding: 10px 15px; border-radius: 8px; }
+    .header .stat-value { font-size: 24px; font-weight: bold; }
+    .header .stat-label { font-size: 12px; opacity: 0.9; }
+
+    .controls {
+      background: white;
+      padding: 15px;
+      border-radius: 12px;
+      margin-bottom: 20px;
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .controls input, .controls select {
+      padding: 10px 15px;
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      font-size: 14px;
+    }
+    .controls input { flex: 1; min-width: 200px; }
+    .controls button {
+      padding: 10px 20px;
+      background: #667eea;
+      color: white;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    .controls button:hover { background: #5a6fd6; }
+
+    .products-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+      gap: 20px;
+    }
+
+    .product-card {
+      background: white;
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    }
+    .product-main {
+      display: flex;
+      padding: 15px;
+      gap: 15px;
+      border-bottom: 1px solid #eee;
+    }
+    .product-image {
+      width: 80px;
+      height: 80px;
+      object-fit: cover;
+      border-radius: 8px;
+      background: #f0f0f0;
+    }
+    .product-info { flex: 1; }
+    .product-title { font-weight: 600; margin-bottom: 5px; font-size: 14px; }
+    .product-meta { color: #666; font-size: 12px; }
+    .product-price { color: #667eea; font-weight: 600; }
+    .product-id { color: #999; font-size: 11px; }
+
+    .recommendations {
+      padding: 15px;
+      background: #fafafa;
+    }
+    .recommendations h4 {
+      font-size: 12px;
+      color: #666;
+      margin-bottom: 10px;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .recommendations h4 .count {
+      background: #667eea;
+      color: white;
+      padding: 2px 8px;
+      border-radius: 10px;
+      font-size: 11px;
+    }
+    .rec-list { display: flex; flex-direction: column; gap: 10px; }
+    .rec-item {
+      display: flex;
+      gap: 10px;
+      padding: 10px;
+      background: white;
+      border-radius: 8px;
+      border: 1px solid #eee;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .rec-item:hover {
+      border-color: #667eea;
+      box-shadow: 0 2px 8px rgba(102,126,234,0.2);
+    }
+    .rec-image {
+      width: 50px;
+      height: 50px;
+      object-fit: cover;
+      border-radius: 6px;
+      background: #f0f0f0;
+    }
+    .rec-info { flex: 1; }
+    .rec-title { font-size: 12px; font-weight: 500; margin-bottom: 3px; }
+    .rec-reason { font-size: 11px; color: #888; }
+    .rec-price { font-size: 12px; color: #667eea; font-weight: 600; }
+
+    .no-recs {
+      text-align: center;
+      padding: 20px;
+      color: #999;
+      font-size: 13px;
+    }
+
+    .loading {
+      text-align: center;
+      padding: 40px;
+      color: #666;
+    }
+    .loading::after {
+      content: '';
+      display: inline-block;
+      width: 20px;
+      height: 20px;
+      border: 2px solid #667eea;
+      border-top-color: transparent;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+      margin-left: 10px;
+      vertical-align: middle;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .toast {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      background: #333;
+      color: white;
+      padding: 12px 20px;
+      border-radius: 8px;
+      font-size: 14px;
+      opacity: 0;
+      transform: translateY(20px);
+      transition: all 0.3s;
+    }
+    .toast.show {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>CartWhisper 测试面板</h1>
+    <div class="stats">
+      <div class="stat">
+        <div class="stat-value" id="productCount">-</div>
+        <div class="stat-label">商品数量</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value" id="recCount">-</div>
+        <div class="stat-label">推荐数量</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value" id="impressions">-</div>
+        <div class="stat-label">展示次数</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value" id="clicks">-</div>
+        <div class="stat-label">点击次数</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value" id="ctr">-</div>
+        <div class="stat-label">CTR</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="controls">
+    <input type="text" id="shopDomain" placeholder="商店域名 (如: skims-test.myshopify.com)" />
+    <input type="text" id="apiKey" placeholder="API Key (可选，用于获取统计)" />
+    <button onclick="loadShop()">加载商店</button>
+  </div>
+
+  <div id="productsContainer" class="products-grid">
+    <div class="loading" style="grid-column: 1/-1;">请输入商店域名并点击加载</div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script>
+    const BACKEND_URL = 'https://cartwhisperaibackend-production.up.railway.app';
+    let currentShop = '';
+    let currentApiKey = '';
+
+    // 从 URL 参数加载
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('shop')) {
+      document.getElementById('shopDomain').value = params.get('shop');
+    }
+    if (params.get('key')) {
+      document.getElementById('apiKey').value = params.get('key');
+    }
+
+    function showToast(msg) {
+      const toast = document.getElementById('toast');
+      toast.textContent = msg;
+      toast.classList.add('show');
+      setTimeout(() => toast.classList.remove('show'), 3000);
+    }
+
+    async function loadShop() {
+      currentShop = document.getElementById('shopDomain').value.trim();
+      currentApiKey = document.getElementById('apiKey').value.trim();
+
+      if (!currentShop) {
+        showToast('请输入商店域名');
+        return;
+      }
+
+      // 更新 URL
+      const url = new URL(window.location);
+      url.searchParams.set('shop', currentShop);
+      if (currentApiKey) url.searchParams.set('key', currentApiKey);
+      window.history.replaceState({}, '', url);
+
+      document.getElementById('productsContainer').innerHTML = '<div class="loading" style="grid-column: 1/-1;">加载中...</div>';
+
+      try {
+        // 加载商店信息
+        const planRes = await fetch(`${BACKEND_URL}/api/shops/${encodeURIComponent(currentShop)}/plan`);
+        const planData = await planRes.json();
+
+        document.getElementById('productCount').textContent = planData.productCount || 0;
+
+        // 如果有 API Key，加载统计
+        if (currentApiKey) {
+          const statsRes = await fetch(`${BACKEND_URL}/api/statistics`, {
+            headers: { 'X-API-Key': currentApiKey }
+          });
+          const statsData = await statsRes.json();
+
+          if (statsData.statistics) {
+            const s = statsData.statistics.summary;
+            document.getElementById('impressions').textContent = s.totalImpressions;
+            document.getElementById('clicks').textContent = s.totalClicks;
+            document.getElementById('ctr').textContent = s.ctr + '%';
+          }
+
+          // 加载商品和推荐
+          const recsRes = await fetch(`${BACKEND_URL}/api/recommendations?limit=100`, {
+            headers: { 'X-API-Key': currentApiKey }
+          });
+          const recsData = await recsRes.json();
+
+          document.getElementById('recCount').textContent = recsData.stats?.recommendations || 0;
+
+          // 按源商品分组推荐
+          const productMap = new Map();
+
+          if (recsData.recommendations) {
+            for (const rec of recsData.recommendations) {
+              const sourceId = rec.sourceProductId;
+              if (!productMap.has(sourceId)) {
+                productMap.set(sourceId, {
+                  id: sourceId,
+                  title: rec.sourceTitle || `Product ${sourceId}`,
+                  image: rec.sourceImage,
+                  recommendations: []
+                });
+              }
+              productMap.get(sourceId).recommendations.push({
+                id: rec.targetProductId,
+                title: rec.targetTitle,
+                image: rec.targetImage,
+                price: rec.targetPrice,
+                reason: rec.reason,
+                impressions: rec.impressions,
+                clicks: rec.clicks
+              });
+            }
+          }
+
+          renderProducts(Array.from(productMap.values()));
+        } else {
+          document.getElementById('productsContainer').innerHTML =
+            '<div class="no-recs" style="grid-column: 1/-1;">请提供 API Key 以查看商品和推荐</div>';
+        }
+
+      } catch (e) {
+        console.error(e);
+        showToast('加载失败: ' + e.message);
+        document.getElementById('productsContainer').innerHTML =
+          '<div class="no-recs" style="grid-column: 1/-1;">加载失败: ' + e.message + '</div>';
+      }
+    }
+
+    function renderProducts(products) {
+      const container = document.getElementById('productsContainer');
+
+      if (products.length === 0) {
+        container.innerHTML = '<div class="no-recs" style="grid-column: 1/-1;">暂无商品数据</div>';
+        return;
+      }
+
+      container.innerHTML = products.map(product => `
+        <div class="product-card">
+          <div class="product-main">
+            <img class="product-image" src="${product.image || 'https://via.placeholder.com/80?text=No+Image'}"
+                 onerror="this.src='https://via.placeholder.com/80?text=No+Image'" />
+            <div class="product-info">
+              <div class="product-title">${product.title}</div>
+              <div class="product-id">ID: ${product.id}</div>
+              <div class="product-meta">${product.recommendations.length} 条推荐</div>
+            </div>
+          </div>
+          <div class="recommendations">
+            <h4>推荐商品 <span class="count">${product.recommendations.length}</span></h4>
+            ${product.recommendations.length > 0 ? `
+              <div class="rec-list">
+                ${product.recommendations.map(rec => `
+                  <div class="rec-item" onclick="trackClick('${product.id}', '${rec.id}')">
+                    <img class="rec-image" src="${rec.image || 'https://via.placeholder.com/50?text=No+Image'}"
+                         onerror="this.src='https://via.placeholder.com/50?text=No+Image'" />
+                    <div class="rec-info">
+                      <div class="rec-title">${rec.title}</div>
+                      <div class="rec-reason">${rec.reason || '无推荐理由'}</div>
+                      <div class="rec-price">$${rec.price || '0'}</div>
+                    </div>
+                  </div>
+                `).join('')}
+              </div>
+            ` : '<div class="no-recs">暂无推荐</div>'}
+          </div>
+        </div>
+      `).join('');
+    }
+
+    async function trackClick(sourceId, targetId) {
+      try {
+        const res = await fetch(`${BACKEND_URL}/api/tracking/click`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            shop: currentShop,
+            sourceProductId: sourceId,
+            targetProductId: targetId
+          })
+        });
+        const data = await res.json();
+        if (data.success) {
+          showToast('点击已记录！');
+          // 刷新统计
+          if (currentApiKey) {
+            const statsRes = await fetch(`${BACKEND_URL}/api/statistics`, {
+              headers: { 'X-API-Key': currentApiKey }
+            });
+            const statsData = await statsRes.json();
+            if (statsData.statistics) {
+              const s = statsData.statistics.summary;
+              document.getElementById('clicks').textContent = s.totalClicks;
+              document.getElementById('ctr').textContent = s.ctr + '%';
+            }
+          }
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    // 自动加载
+    if (params.get('shop')) {
+      loadShop();
+    }
+  </script>
+</body>
+</html>
