@@ -230,6 +230,32 @@ async function generateRecommendations(products, allProducts = null) {
     return 'unisex';
   };
 
+  // 识别商品细分类型（用于排除同类推荐）
+  const getCategory = (p) => {
+    const title = (p.title || '').toLowerCase();
+    const type = (p.productType || '').toLowerCase();
+
+    // 配饰类（细分）
+    if (title.match(/\b(hat|cap|beanie|visor)\b/)) return 'hat';
+    if (title.match(/\b(earring|necklace|bracelet|ring|jewelry)\b/)) return 'jewelry';
+    if (title.match(/\b(bag|purse|backpack|tote)\b/)) return 'bag';
+    if (title.match(/\b(sock|socks)\b/)) return 'sock';
+    if (title.match(/\b(shoe|sneaker|boot|sandal|slipper|heel)\b/)) return 'shoe';
+    if (title.match(/\b(belt|watch|sunglasses|scarf)\b/)) return 'accessory';
+
+    // 服装类（细分）
+    if (title.match(/\b(t-shirt|tee|shirt|top|blouse|tank|cami)\b/) || type.includes('top')) return 'top';
+    if (title.match(/\b(pant|jean|trouser|legging|short|jogger)\b/) || type.includes('bottom')) return 'bottom';
+    if (title.match(/\b(dress|gown|maxi|mini)\b/) && !title.includes('shirt')) return 'dress';
+    if (title.match(/\b(skirt|skort)\b/)) return 'skirt';
+    if (title.match(/\b(jacket|coat|blazer|cardigan|hoodie|sweater)\b/)) return 'outerwear';
+    if (title.match(/\b(swimsuit|bikini|swim trunk|swimwear)\b/)) return 'swim';
+    if (title.match(/\b(bra|panty|underwear|lingerie|bodysuit)\b/)) return 'underwear';
+    if (title.match(/\b(pajama|pj|sleep|lounge|robe)\b/)) return 'sleepwear';
+
+    return type || 'other';
+  };
+
   const summarize = (p) => {
     const desc = (p.description || '').substring(0, 100).replace(/\s+/g, ' ');
     const title = p.title || '';
@@ -241,8 +267,9 @@ async function generateRecommendations(products, allProducts = null) {
 
   for (const product of products) {
     const productGender = getGender(product);
+    const productCategory = getCategory(product);
 
-    // 过滤：排除同款、同ID、性别不匹配的商品
+    // 过滤：排除同款、同ID、性别不匹配、同类型的商品
     const others = targetPool.filter(p => {
       if (p.productId === product.productId) return false;
       if (isSameProduct(product, p)) return false;
@@ -251,6 +278,10 @@ async function generateRecommendations(products, allProducts = null) {
       const targetGender = getGender(p);
       if (productGender === 'male' && targetGender === 'female') return false;
       if (productGender === 'female' && targetGender === 'male') return false;
+
+      // 类型过滤：同类商品不互相推荐（帽子不推荐帽子，上衣不推荐上衣等）
+      const targetCategory = getCategory(p);
+      if (productCategory === targetCategory && productCategory !== 'other') return false;
 
       return true;
     });
