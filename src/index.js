@@ -216,30 +216,44 @@ async function generateRecommendations(products, allProducts = null) {
   const results = [];
 
   // 简化商品描述，提取关键信息
+  const getGender = (p) => {
+    const title = (p.title || '').toLowerCase();
+    const type = (p.productType || '').toLowerCase();
+    const tags = (p.tags || []).join(' ').toLowerCase();
+    const all = title + ' ' + type + ' ' + tags;
+
+    if (tags.match(/\bmens\b|filtergender:\s*mens/) || all.match(/\b(men'?s|male|boy)\b/) || type.includes('mens')) {
+      return 'male';
+    } else if (tags.match(/\bwomens\b|filtergender:\s*womens/) || all.match(/\b(women'?s|female|girl|ladies)\b/) || title.match(/dress|skirt|bra/i)) {
+      return 'female';
+    }
+    return 'unisex';
+  };
+
   const summarize = (p) => {
     const desc = (p.description || '').substring(0, 100).replace(/\s+/g, ' ');
     const title = p.title || '';
     const type = p.productType || '未分类';
-    const tags = (p.tags || []).join(' ').toLowerCase();
-
-    // 识别性别（从 tags、productType、title 识别）
-    let gender = '';
-    const all = (title + ' ' + type + ' ' + desc + ' ' + tags).toLowerCase();
-    if (tags.match(/\bmens\b|filtergender:\s*mens/) || all.match(/\b(men'?s|male|boy)\b/) || type.toLowerCase().includes('mens')) {
-      gender = '[男士]';
-    } else if (tags.match(/\bwomens\b|filtergender:\s*womens/) || all.match(/\b(women'?s|female|girl|ladies)\b/) || title.match(/dress|skirt|bra/i)) {
-      gender = '[女士]';
-    }
-
-    return `${gender}${title} [${type}] ${desc}`;
+    const gender = getGender(p);
+    const genderLabel = gender === 'male' ? '[男士]' : gender === 'female' ? '[女士]' : '';
+    return `${genderLabel}${title} [${type}] ${desc}`;
   };
 
   for (const product of products) {
-    // 只排除同款和同ID，不做硬编码的类型过滤
-    const others = targetPool.filter(p =>
-      p.productId !== product.productId &&
-      !isSameProduct(product, p)
-    );
+    const productGender = getGender(product);
+
+    // 过滤：排除同款、同ID、性别不匹配的商品
+    const others = targetPool.filter(p => {
+      if (p.productId === product.productId) return false;
+      if (isSameProduct(product, p)) return false;
+
+      // 性别过滤：男士商品不推荐女士商品，女士商品不推荐男士商品
+      const targetGender = getGender(p);
+      if (productGender === 'male' && targetGender === 'female') return false;
+      if (productGender === 'female' && targetGender === 'male') return false;
+
+      return true;
+    });
     if (others.length === 0) continue;
 
     const prompt = `你是电商cross-sell推荐专家。请为以下商品推荐3个最佳搭配产品。
