@@ -100,17 +100,67 @@ node scripts/test-with-real-data.js reset <api-key>
 node scripts/test-with-real-data.js reset cw_xxxxxxxx
 ```
 
-**输出：**
-```
-🗑️  Resetting shop data...
-✅ Deleted 50 products and 150 recommendations
+---
+
+### 5. 重新加载（reset + import）
+
+修改推荐算法后，快速重新生成推荐：
+
+```bash
+node scripts/test-with-real-data.js reload <json-file> <api-key> [--limit=N]
 ```
 
-> ⚠️ 此操作不可逆，请谨慎使用。
+**示例：**
+```bash
+# 重新加载全部数据
+node scripts/test-with-real-data.js reload test-data/products-fashionnova-1767786518460.json cw_xxx
+
+# 限制只导入 20 个商品（快速测试）
+node scripts/test-with-real-data.js reload test-data/products-fashionnova-1767786518460.json cw_xxx --limit=20
+```
 
 ---
 
-### 5. 测试推荐质量
+### 6. 批量重新加载所有测试数据
+
+使用配置文件批量重新加载多个商店：
+
+```bash
+node scripts/test-with-real-data.js reload-all [config-file]
+```
+
+**配置文件格式** (`test-data/config.json`)：
+```json
+{
+  "shops": [
+    {
+      "name": "Fashion Nova Test",
+      "file": "test-data/products-fashionnova-1767786518460.json",
+      "apiKey": "cw_xxx",
+      "limit": 20
+    },
+    {
+      "name": "Gymshark Test",
+      "file": "test-data/products-gymshark-xxx.json",
+      "apiKey": "cw_yyy",
+      "limit": 30
+    }
+  ]
+}
+```
+
+**示例：**
+```bash
+# 使用默认配置文件
+node scripts/test-with-real-data.js reload-all
+
+# 指定配置文件
+node scripts/test-with-real-data.js reload-all test-data/my-config.json
+```
+
+---
+
+### 7. 测试推荐质量
 
 测试推荐系统的质量：
 
@@ -144,7 +194,7 @@ Shop has 50 products
 
 ---
 
-### 6. 负载测试
+### 8. 负载测试
 
 测试 API 在并发情况下的性能：
 

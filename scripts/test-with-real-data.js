@@ -336,6 +336,67 @@ async function resetShop(apiKey) {
   }
 }
 
+// 重新加载：reset + import（用于快速重新生成推荐）
+async function reloadShop(filepath, apiKey, limit = 0) {
+  log(`\n🔄 Reloading shop data...`, 'cyan');
+  log(`   File: ${filepath}`);
+
+  // Step 1: Reset
+  const resetSuccess = await resetShop(apiKey);
+  if (!resetSuccess) {
+    log(`❌ Reset failed, aborting reload`, 'red');
+    return false;
+  }
+
+  // Step 2: Import
+  await new Promise(r => setTimeout(r, 1000)); // 等待 1 秒
+  const importSuccess = await importProducts(filepath, apiKey, limit);
+
+  if (importSuccess) {
+    log(`\n✅ Reload complete!`, 'green');
+  }
+  return importSuccess;
+}
+
+// 批量重新加载所有 test-data 中的数据
+async function reloadAll(configFile) {
+  log(`\n🔄 Reloading all test data...`, 'cyan');
+
+  try {
+    const config = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+
+    if (!config.shops || !Array.isArray(config.shops)) {
+      throw new Error('Config file must contain "shops" array');
+    }
+
+    log(`Found ${config.shops.length} shops to reload\n`);
+
+    for (const shop of config.shops) {
+      if (!shop.file || !shop.apiKey) {
+        log(`⚠ Skipping invalid shop config: ${JSON.stringify(shop)}`, 'yellow');
+        continue;
+      }
+
+      log(`\n${'='.repeat(50)}`, 'cyan');
+      log(`📦 Shop: ${shop.name || shop.file}`, 'cyan');
+      log(`${'='.repeat(50)}`, 'cyan');
+
+      await reloadShop(shop.file, shop.apiKey, shop.limit || 0);
+
+      // 等待一段时间再处理下一个
+      await new Promise(r => setTimeout(r, 2000));
+    }
+
+    log(`\n${'='.repeat(50)}`, 'green');
+    log(`✅ All shops reloaded!`, 'green');
+    log(`${'='.repeat(50)}`, 'green');
+
+  } catch (error) {
+    log(`❌ Error: ${error.message}`, 'red');
+    return false;
+  }
+}
+
 // 负载测试
 async function loadTest(domain, concurrency = 10, requests = 100) {
   log(`\n⚡ Load testing: ${concurrency} concurrent, ${requests} total requests`, 'cyan');
@@ -406,12 +467,18 @@ CartWhisper 测试工具
                              示例: node scripts/test-with-real-data.js register test-shop.myshopify.com
 
   import <file> <api-key>    导入产品数据
-                             示例: node scripts/test-with-real-data.js import test-data/products.json sk_xxx
+                             示例: node scripts/test-with-real-data.js import test-data/products.json cw_xxx
 
   reset <api-key>            删除所有商品和推荐数据
                              示例: node scripts/test-with-real-data.js reset cw_xxx
 
-  test <domain>              测试推荐质量
+  reload <file> <api-key>    重新加载：reset + import（快速重新生成推荐）
+                             示例: node scripts/test-with-real-data.js reload test-data/products.json cw_xxx
+
+  reload-all [config]        批量重新加载所有测试数据
+                             示例: node scripts/test-with-real-data.js reload-all test-data/config.json
+
+  test <domain> [file]       测试推荐质量
                              设置 TEST_PRODUCT_IDS=id1,id2 来测试特定产品
 
   load <domain>              负载测试
@@ -430,10 +497,16 @@ CartWhisper 测试工具
      node scripts/test-with-real-data.js register my-test.myshopify.com
 
   3. 导入产品数据:
-     node scripts/test-with-real-data.js import test-data/products-gymshark-xxx.json sk_xxx
+     node scripts/test-with-real-data.js import test-data/products-gymshark-xxx.json cw_xxx
 
   4. 测试推荐:
-     TEST_PRODUCT_IDS=123,456 node scripts/test-with-real-data.js test my-test.myshopify.com
+     node scripts/test-with-real-data.js test my-test.myshopify.com
+
+  5. 修改代码后快速重新加载:
+     node scripts/test-with-real-data.js reload test-data/products-gymshark-xxx.json cw_xxx
+
+  6. 批量重新加载所有测试商店:
+     node scripts/test-with-real-data.js reload-all
 `, 'cyan');
 }
 
@@ -476,6 +549,21 @@ async function main() {
         return;
       }
       await resetShop(args[1]);
+      break;
+
+    case 'reload':
+      if (!args[1] || !args[2]) {
+        log('❌ Please provide filepath and API key', 'red');
+        log('Usage: reload <file> <api-key> [--limit=N]');
+        return;
+      }
+      const reloadLimit = parseInt(args.find(a => a.startsWith('--limit='))?.split('=')[1]) || 0;
+      await reloadShop(args[1], args[2], reloadLimit);
+      break;
+
+    case 'reload-all':
+      const configPath = args[1] || 'test-data/config.json';
+      await reloadAll(configPath);
       break;
 
     case 'test':

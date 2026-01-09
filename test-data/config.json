@@ -1,0 +1,10 @@
+{
+  "shops": [
+    {
+      "name": "Fashion Nova Test",
+      "file": "test-data/products-fashionnova-1767786518460.json",
+      "apiKey": "cw_YOUR_API_KEY_HERE",
+      "limit": 20
+    }
+  ]
+}
