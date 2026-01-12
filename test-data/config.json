@@ -1,10 +1,53 @@
 {
   "shops": [
     {
+      "name": "Skims Test",
+      "file": "test-data/products-skims-1767770627953.json",
+      "apiKey": "cw_d383c2f14458409b955e5fb5baa18cdf",
+      "category": "服装类",
+      "limit": 10
+    },
+    {
+      "name": "Allbirds Test",
+      "file": "test-data/products-allbirds-1767785689461.json",
+      "apiKey": "cw_c321f1c8741c4ae8af0047ba8650afeb",
+      "category": "鞋子",
+      "limit": 10
+    },
+    {
       "name": "Fashion Nova Test",
       "file": "test-data/products-fashionnova-1767786518460.json",
-      "apiKey": "cw_YOUR_API_KEY_HERE",
-      "limit": 20
+      "apiKey": "cw_9defac8c1dea452e82a5436f3e765d55",
+      "category": "睡衣",
+      "limit": 10
+    },
+    {
+      "name": "Chubbies Shorts Test",
+      "file": "test-data/products-chubbiesshorts-1767841522548.json",
+      "apiKey": "cw_ed0d4032b1a64da3a961991f96c6e33f",
+      "category": "男士鞋子",
+      "limit": 10
+    },
+    {
+      "name": "Colourpop Test",
+      "file": "test-data/products-colourpop-1767865182612.json",
+      "apiKey": "cw_32511652d37e49499a1929ee2f61a877",
+      "category": "化妆品",
+      "limit": 10
+    },
+    {
+      "name": "Kylie Cosmetics Test",
+      "file": "test-data/products-kyliecosmetics-1767871751676.json",
+      "apiKey": "cw_413924d142f04345a0fa01adabaefd7b",
+      "category": "化妆品",
+      "limit": 10
+    },
+    {
+      "name": "Gymshark Test",
+      "file": "test-data/products-gymshark-1767872350910.json",
+      "apiKey": "cw_afc1c30eb08245a68f6d3f1420b2328a",
+      "category": "鞋子",
+      "limit": 10
     }
   ]
 }
