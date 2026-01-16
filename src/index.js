@@ -181,7 +181,7 @@ async function callDeepSeek(prompt) {
       body: JSON.stringify({
         model: 'deepseek-chat',
         messages: [
-          { role: 'system', content: '你是电商推荐专家。返回JSON，包含recommendations数组，每个元素有productId和reason。reason简短15字内。只返回JSON。' },
+          { role: 'system', content: 'You are an e-commerce recommendation expert. Return JSON with a recommendations array, each element containing productId and reason. Keep reason brief (under 50 characters). Return only JSON, no other text.' },
           { role: 'user', content: prompt }
         ],
         temperature: 0.7
@@ -259,9 +259,9 @@ async function generateRecommendations(products, allProducts = null) {
   const summarize = (p) => {
     const desc = (p.description || '').substring(0, 100).replace(/\s+/g, ' ');
     const title = p.title || '';
-    const type = p.productType || '未分类';
+    const type = p.productType || 'Uncategorized';
     const gender = getGender(p);
-    const genderLabel = gender === 'male' ? '[男士]' : gender === 'female' ? '[女士]' : '';
+    const genderLabel = gender === 'male' ? '[Men]' : gender === 'female' ? '[Women]' : '';
     return `${genderLabel}${title} [${type}] ${desc}`;
   };
 
@@ -287,23 +287,23 @@ async function generateRecommendations(products, allProducts = null) {
     });
     if (others.length === 0) continue;
 
-    const prompt = `你是电商cross-sell推荐专家。请为以下商品推荐3个最佳搭配产品。
+    const prompt = `You are an e-commerce cross-sell recommendation expert. Please recommend 3 best matching products for the following item.
 
-【源商品】
+[Source Product]
 ${summarize(product)}
-价格: ¥${product.price}
+Price: $${product.price}
 
-【候选商品】
-${others.map((p, i) => `${i + 1}. ID:${p.productId} | ${summarize(p)} | ¥${p.price}`).join('\n')}
+[Candidate Products]
+${others.map((p, i) => `${i + 1}. ID:${p.productId} | ${summarize(p)} | $${p.price}`).join('\n')}
 
-【核心规则 - 必须严格遵守】
-1. 性别必须一致：[男士]商品只能推荐[男士]或中性商品，[女士]商品只能推荐[女士]或中性商品
-2. 禁止推荐同类：服装不推荐服装！上衣不推荐上衣，裤子不推荐裤子，裙子不推荐裙子
-3. 优先推荐配饰：耳环、项链、包包、帽子、袜子、鞋子等配饰是最佳选择
-4. 同时使用原则：推荐能与源商品一起穿戴的商品，而非替代品
+[Core Rules - Must Follow Strictly]
+1. Gender must match: [Men] products can only recommend [Men] or unisex items, [Women] products can only recommend [Women] or unisex items
+2. No same-category recommendations: Don't recommend clothing for clothing! No tops for tops, no pants for pants, no dresses for dresses
+3. Prioritize accessories: Earrings, necklaces, bags, hats, socks, shoes and other accessories are the best choices
+4. Complementary principle: Recommend items that can be worn together with the source product, not replacements
 
-请返回JSON，包含3个推荐:
-{"recommendations":[{"productId":"xxx","reason":"中文理由|English reason"}]}`;
+Return JSON with 3 recommendations in ENGLISH ONLY:
+{"recommendations":[{"productId":"xxx","reason":"English reason only"}]}`;
 
     const aiRes = await callDeepSeek(prompt);
     if (aiRes) {
@@ -321,7 +321,7 @@ ${others.map((p, i) => `${i + 1}. ID:${p.productId} | ${summarize(p)} | ¥${p.pr
             results.push({
               sourceId: product.productId,
               targetId: target.productId,
-              reason: rec.reason || '推荐搭配|Recommended pairing'
+              reason: rec.reason || 'Recommended pairing'
             });
           }
         }
@@ -339,7 +339,7 @@ ${others.map((p, i) => `${i + 1}. ID:${p.productId} | ${summarize(p)} | ¥${p.pr
         results.push({
           sourceId: product.productId,
           targetId: t.productId,
-          reason: '完美搭配|Perfect match'
+          reason: 'Perfect match'
         });
       });
     }
