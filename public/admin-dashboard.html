@@ -1158,24 +1158,38 @@
 
     // 渲染推荐管理UI
     function renderRecommendationsUI() {
+      // 生成商店选项
+      const shopOptions = shopsData && shopsData.length > 0
+        ? shopsData.map(shop => `<option value="${shop.apiKey || ''}">${shop.domain} (${shop.plan})</option>`).join('')
+        : '<option value="">暂无商店数据</option>';
+
       document.getElementById('recommendationsContent').innerHTML = `
         <div class="api-key-input">
-          <input
-            type="text"
+          <select
             id="apiKeyInput"
-            placeholder="请输入商店API Key (例如: shop_xxx...)"
-            value="${currentApiKey}"
+            style="flex: 1; padding: 10px 15px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 14px; font-family: 'Courier New', monospace;"
             onchange="currentApiKey = this.value"
-          />
+          >
+            <option value="">请选择商店</option>
+            ${shopOptions}
+          </select>
           <button class="btn btn-primary" onclick="loadRecommendations()">🔍 查询推荐</button>
         </div>
         <div id="recommendationsData">
           <div class="empty">
             <div class="empty-icon">🎯</div>
-            <p>请输入API Key查询推荐数据</p>
+            <p>请选择商店查询推荐数据</p>
           </div>
         </div>
       `;
+
+      // 如果有当前API Key，设置选中状态
+      if (currentApiKey) {
+        const select = document.getElementById('apiKeyInput');
+        if (select) {
+          select.value = currentApiKey;
+        }
+      }
     }
 
     // 加载推荐数据
