@@ -1834,7 +1834,7 @@ app.get('/api/monitoring/stats', async (req, res) => {
 app.get('/api/monitoring/shops', async (req, res) => {
   try {
     const result = await pool.query(`
-      SELECT domain, plan, "productCount", "initialSyncDone", "lastRefreshAt", "createdAt"
+      SELECT domain, plan, "apiKey", "productCount", "initialSyncDone", "lastRefreshAt", "createdAt"
       FROM "Shop"
       ORDER BY "createdAt" DESC
     `);
