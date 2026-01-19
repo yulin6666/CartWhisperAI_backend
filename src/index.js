@@ -1090,15 +1090,28 @@ app.get('/api/recommendations', queryLimiter, auth, async (req, res) => {
 
 // 删除商店的所有推荐
 app.delete('/api/recommendations', auth, async (req, res) => {
+  const client = await pool.connect();
   try {
     const shopId = req.shop.id;
-    const result = await pool.query('DELETE FROM "Recommendation" WHERE "shopId" = $1', [shopId]);
-    console.log(`[Admin] Deleted ${result.rowCount} recommendations for ${req.shop.domain}`);
+
+    // 先删除推荐（外键约束）
+    const recResult = await client.query('DELETE FROM "Recommendation" WHERE "shopId" = $1', [shopId]);
+    // 再删除商品
+    const prodResult = await client.query('DELETE FROM "Product" WHERE "shopId" = $1', [shopId]);
+
+    console.log(`[Admin] Deleted ${prodResult.rowCount} products and ${recResult.rowCount} recommendations for ${req.shop.domain}`);
     cache.clear();
-    res.json({ success: true, deleted: result.rowCount });
+    res.json({
+      success: true,
+      deleted: recResult.rowCount,
+      deletedProducts: prodResult.rowCount,
+      deletedRecommendations: recResult.rowCount
+    });
   } catch (e) {
     console.error('[Admin] Error:', e);
     res.status(500).json({ error: e.message });
+  } finally {
+    client.release();
   }
 });
 

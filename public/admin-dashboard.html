@@ -1257,7 +1257,7 @@
               </div>
             </div>
             <button class="btn btn-danger" disabled style="opacity: 0.5;">
-              🗑️ 清空所有推荐
+              🗑️ 清空推荐和商品
             </button>
           </div>
           <div class="empty">
@@ -1354,7 +1354,7 @@
         return;
       }
 
-      if (!confirm('确定要清空所有推荐吗？此操作不可恢复！')) {
+      if (!confirm('确定要清空所有推荐和商品吗？此操作不可恢复！\n\n将会删除：\n• 所有AI推荐数据\n• 所有商品数据')) {
         return;
       }
 
@@ -1372,13 +1372,13 @@
         }
 
         const result = await response.json();
-        alert(`成功删除 ${result.deleted} 条推荐！`);
+        alert(`成功删除：\n• ${result.deletedRecommendations} 条推荐\n• ${result.deletedProducts} 个商品`);
 
         // 重新加载推荐数据
         await loadRecommendations();
       } catch (error) {
         console.error('Failed to clear recommendations:', error);
-        alert(`清空推荐失败: ${error.message}`);
+        alert(`清空失败: ${error.message}`);
       }
     }
 
