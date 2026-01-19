@@ -1,0 +1,1028 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CartWhisper AI - 后端监控管理</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      padding: 20px;
+    }
+
+    .container {
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+
+    .header {
+      background: white;
+      border-radius: 12px;
+      padding: 30px;
+      margin-bottom: 20px;
+      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    }
+
+    .header h1 {
+      color: #333;
+      font-size: 32px;
+      margin-bottom: 10px;
+    }
+
+    .header p {
+      color: #666;
+      font-size: 16px;
+    }
+
+    .filters {
+      background: white;
+      border-radius: 12px;
+      padding: 20px;
+      margin-bottom: 20px;
+      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    }
+
+    .filter-row {
+      display: flex;
+      gap: 15px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    .filter-group {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+
+    .filter-group label {
+      font-size: 14px;
+      color: #666;
+      font-weight: 500;
+    }
+
+    .filter-group select,
+    .filter-group input {
+      padding: 10px 15px;
+      border: 2px solid #e0e0e0;
+      border-radius: 8px;
+      font-size: 14px;
+      min-width: 200px;
+      transition: border-color 0.3s;
+    }
+
+    .filter-group select:focus,
+    .filter-group input:focus {
+      outline: none;
+      border-color: #667eea;
+    }
+
+    .btn {
+      padding: 10px 20px;
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.3s;
+      margin-top: auto;
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+    }
+
+    .btn-primary:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+    }
+
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+      gap: 20px;
+      margin-bottom: 20px;
+    }
+
+    .stat-card {
+      background: white;
+      border-radius: 12px;
+      padding: 25px;
+      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+      transition: transform 0.3s;
+    }
+
+    .stat-card:hover {
+      transform: translateY(-5px);
+    }
+
+    .stat-card h3 {
+      color: #666;
+      font-size: 14px;
+      font-weight: 500;
+      margin-bottom: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .stat-card .value {
+      color: #333;
+      font-size: 36px;
+      font-weight: 700;
+      margin-bottom: 5px;
+    }
+
+    .stat-card .subtitle {
+      color: #999;
+      font-size: 13px;
+    }
+
+    .stat-card.success .value {
+      color: #10b981;
+    }
+
+    .stat-card.danger .value {
+      color: #ef4444;
+    }
+
+    .stat-card.warning .value {
+      color: #f59e0b;
+    }
+
+    .stat-card.info .value {
+      color: #3b82f6;
+    }
+
+    .tabs {
+      background: white;
+      border-radius: 12px;
+      padding: 20px;
+      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    }
+
+    .tab-buttons {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 20px;
+      border-bottom: 2px solid #e0e0e0;
+      padding-bottom: 10px;
+    }
+
+    .tab-btn {
+      padding: 10px 20px;
+      border: none;
+      background: transparent;
+      color: #666;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      border-bottom: 3px solid transparent;
+      transition: all 0.3s;
+    }
+
+    .tab-btn.active {
+      color: #667eea;
+      border-bottom-color: #667eea;
+    }
+
+    .tab-content {
+      display: none;
+    }
+
+    .tab-content.active {
+      display: block;
+    }
+
+    .table-container {
+      overflow-x: auto;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    th {
+      background: #f9fafb;
+      padding: 15px;
+      text-align: left;
+      font-weight: 600;
+      color: #666;
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      border-bottom: 2px solid #e0e0e0;
+    }
+
+    td {
+      padding: 15px;
+      border-bottom: 1px solid #f0f0f0;
+      color: #333;
+      font-size: 14px;
+    }
+
+    tr:hover {
+      background: #f9fafb;
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 5px 12px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+
+    .badge-success {
+      background: #d1fae5;
+      color: #065f46;
+    }
+
+    .badge-danger {
+      background: #fee2e2;
+      color: #991b1b;
+    }
+
+    .badge-warning {
+      background: #fef3c7;
+      color: #92400e;
+    }
+
+    .badge-info {
+      background: #dbeafe;
+      color: #1e40af;
+    }
+
+    .loading {
+      text-align: center;
+      padding: 40px;
+      color: #666;
+    }
+
+    .spinner {
+      border: 3px solid #f3f3f3;
+      border-top: 3px solid #667eea;
+      border-radius: 50%;
+      width: 40px;
+      height: 40px;
+      animation: spin 1s linear infinite;
+      margin: 0 auto 15px;
+    }
+
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+
+    .error {
+      background: #fee2e2;
+      color: #991b1b;
+      padding: 15px;
+      border-radius: 8px;
+      margin: 20px 0;
+    }
+
+    .empty {
+      text-align: center;
+      padding: 60px 20px;
+      color: #999;
+    }
+
+    .empty-icon {
+      font-size: 48px;
+      margin-bottom: 15px;
+    }
+
+    .chart-container {
+      margin: 20px 0;
+      padding: 20px;
+      background: white;
+      border-radius: 8px;
+      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+    }
+
+    .chart-container h3 {
+      color: #333;
+      font-size: 18px;
+      margin-bottom: 15px;
+      font-weight: 600;
+    }
+
+    .charts-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(500px, 1fr));
+      gap: 20px;
+      margin-bottom: 20px;
+    }
+
+    .shop-list {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+      gap: 15px;
+      margin-top: 20px;
+    }
+
+    .shop-card {
+      background: #f9fafb;
+      padding: 20px;
+      border-radius: 8px;
+      border-left: 4px solid #667eea;
+    }
+
+    .shop-card h4 {
+      color: #333;
+      margin-bottom: 10px;
+      font-size: 16px;
+    }
+
+    .shop-card .info {
+      display: flex;
+      justify-content: space-between;
+      margin: 5px 0;
+      font-size: 13px;
+      color: #666;
+    }
+
+    .log-detail {
+      background: #f9fafb;
+      padding: 15px;
+      border-radius: 8px;
+      margin-top: 10px;
+      font-family: 'Courier New', monospace;
+      font-size: 12px;
+      max-height: 200px;
+      overflow-y: auto;
+    }
+
+    .log-detail pre {
+      white-space: pre-wrap;
+      word-wrap: break-word;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <!-- Header -->
+    <div class="header">
+      <h1>🚀 CartWhisper AI 后端监控</h1>
+      <p>实时监控同步操作、Token消耗和系统性能</p>
+    </div>
+
+    <!-- Filters -->
+    <div class="filters">
+      <div class="filter-row">
+        <div class="filter-group">
+          <label>商店域名</label>
+          <select id="shopFilter">
+            <option value="">所有商店</option>
+          </select>
+        </div>
+        <div class="filter-group">
+          <label>时间范围</label>
+          <select id="daysFilter">
+            <option value="1">最近1天</option>
+            <option value="3">最近3天</option>
+            <option value="7" selected>最近7天</option>
+            <option value="30">最近30天</option>
+          </select>
+        </div>
+        <div class="filter-group">
+          <label>状态</label>
+          <select id="statusFilter">
+            <option value="">全部</option>
+            <option value="success">成功</option>
+            <option value="failed">失败</option>
+            <option value="started">进行中</option>
+          </select>
+        </div>
+        <button class="btn btn-primary" onclick="loadData()">🔄 刷新数据</button>
+      </div>
+    </div>
+
+    <!-- Stats Grid -->
+    <div class="stats-grid" id="statsGrid">
+      <div class="stat-card">
+        <h3>总同步次数</h3>
+        <div class="value">-</div>
+        <div class="subtitle">加载中...</div>
+      </div>
+      <div class="stat-card success">
+        <h3>成功率</h3>
+        <div class="value">-</div>
+        <div class="subtitle">加载中...</div>
+      </div>
+      <div class="stat-card warning">
+        <h3>Token消耗</h3>
+        <div class="value">-</div>
+        <div class="subtitle">加载中...</div>
+      </div>
+      <div class="stat-card info">
+        <h3>总成本</h3>
+        <div class="value">-</div>
+        <div class="subtitle">加载中...</div>
+      </div>
+    </div>
+
+    <!-- Tabs -->
+    <div class="tabs">
+      <div class="tab-buttons">
+        <button class="tab-btn active" onclick="switchTab('charts')">📈 图表分析</button>
+        <button class="tab-btn" onclick="switchTab('logs')">📋 同步日志</button>
+        <button class="tab-btn" onclick="switchTab('daily')">📊 每日统计</button>
+        <button class="tab-btn" onclick="switchTab('shops')">🏪 商店列表</button>
+      </div>
+
+      <!-- Charts Tab -->
+      <div id="chartsTab" class="tab-content active">
+        <div class="charts-grid">
+          <div class="chart-container">
+            <h3>📊 每日Token消耗趋势</h3>
+            <canvas id="tokenChart"></canvas>
+          </div>
+          <div class="chart-container">
+            <h3>📦 每日同步商品数量</h3>
+            <canvas id="productsChart"></canvas>
+          </div>
+          <div class="chart-container">
+            <h3>✅ 同步成功率</h3>
+            <canvas id="successChart"></canvas>
+          </div>
+          <div class="chart-container">
+            <h3>⏱️ 平均耗时趋势</h3>
+            <canvas id="durationChart"></canvas>
+          </div>
+        </div>
+      </div>
+
+      <!-- Logs Tab -->
+      <div id="logsTab" class="tab-content">
+        <div id="logsContent">
+          <div class="loading">
+            <div class="spinner"></div>
+            <p>加载同步日志...</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Daily Stats Tab -->
+      <div id="dailyTab" class="tab-content">
+        <div id="dailyContent">
+          <div class="loading">
+            <div class="spinner"></div>
+            <p>加载每日统计...</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Shops Tab -->
+      <div id="shopsTab" class="tab-content">
+        <div id="shopsContent">
+          <div class="loading">
+            <div class="spinner"></div>
+            <p>加载商店列表...</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const API_BASE = window.location.origin;
+    let currentTab = 'charts';
+    let statsData = null;
+    let logsData = null;
+    let shopsData = null;
+    let charts = {};
+
+    // 初始化
+    async function init() {
+      await loadShops();
+      await loadData();
+      // 自动刷新（每30秒）
+      setInterval(loadData, 30000);
+    }
+
+    // 加载商店列表
+    async function loadShops() {
+      try {
+        const response = await fetch(`${API_BASE}/api/monitoring/shops`);
+        const data = await response.json();
+
+        if (data.success) {
+          shopsData = data.shops;
+          const select = document.getElementById('shopFilter');
+          select.innerHTML = '<option value="">所有商店</option>';
+          data.shops.forEach(shop => {
+            const option = document.createElement('option');
+            option.value = shop.domain;
+            option.textContent = `${shop.domain} (${shop.plan})`;
+            select.appendChild(option);
+          });
+        }
+      } catch (error) {
+        console.error('Failed to load shops:', error);
+      }
+    }
+
+    // 加载所有数据
+    async function loadData() {
+      const days = document.getElementById('daysFilter').value;
+      const shopDomain = document.getElementById('shopFilter').value;
+      const status = document.getElementById('statusFilter').value;
+
+      await Promise.all([
+        loadStats(days, shopDomain),
+        loadLogs(days, shopDomain, status),
+        loadShopsList()
+      ]);
+
+      // 渲染图表
+      if (currentTab === 'charts') {
+        renderCharts();
+      }
+    }
+
+    // 加载统计数据
+    async function loadStats(days, shopDomain) {
+      try {
+        let url = `${API_BASE}/api/monitoring/stats?days=${days}`;
+        if (shopDomain) url += `&shopDomain=${shopDomain}`;
+
+        const response = await fetch(url);
+        const data = await response.json();
+
+        if (data.success) {
+          statsData = data;
+          renderStats(data);
+        }
+      } catch (error) {
+        console.error('Failed to load stats:', error);
+        document.getElementById('statsGrid').innerHTML = `
+          <div class="error">加载统计数据失败: ${error.message}</div>
+        `;
+      }
+    }
+
+    // 渲染统计卡片
+    function renderStats(data) {
+      const { summary } = data;
+      const successRate = summary.totalSyncs > 0
+        ? ((summary.successfulSyncs / summary.totalSyncs) * 100).toFixed(1)
+        : 0;
+
+      document.getElementById('statsGrid').innerHTML = `
+        <div class="stat-card">
+          <h3>总同步次数</h3>
+          <div class="value">${summary.totalSyncs}</div>
+          <div class="subtitle">成功 ${summary.successfulSyncs} / 失败 ${summary.failedSyncs}</div>
+        </div>
+        <div class="stat-card success">
+          <h3>成功率</h3>
+          <div class="value">${successRate}%</div>
+          <div class="subtitle">平均耗时 ${(summary.avgDuration / 1000).toFixed(2)}s</div>
+        </div>
+        <div class="stat-card warning">
+          <h3>Token消耗</h3>
+          <div class="value">${summary.totalTokens.toLocaleString()}</div>
+          <div class="subtitle">生成 ${summary.totalRecommendations} 个推荐</div>
+        </div>
+        <div class="stat-card info">
+          <h3>总成本</h3>
+          <div class="value">$${summary.totalCost.toFixed(2)}</div>
+          <div class="subtitle">DeepSeek API</div>
+        </div>
+      `;
+    }
+
+    // 加载同步日志
+    async function loadLogs(days, shopDomain, status) {
+      try {
+        let url = `${API_BASE}/api/monitoring/all-sync-logs?days=${days}&limit=50`;
+        if (shopDomain) url += `&shopDomain=${shopDomain}`;
+        if (status) url += `&status=${status}`;
+
+        const response = await fetch(url);
+        const data = await response.json();
+
+        if (data.success) {
+          logsData = data.logs;
+          renderLogs(data.logs);
+        }
+      } catch (error) {
+        console.error('Failed to load logs:', error);
+        document.getElementById('logsContent').innerHTML = `
+          <div class="error">加载日志失败: ${error.message}</div>
+        `;
+      }
+    }
+
+    // 渲染日志表格
+    function renderLogs(logs) {
+      if (logs.length === 0) {
+        document.getElementById('logsContent').innerHTML = `
+          <div class="empty">
+            <div class="empty-icon">📭</div>
+            <p>暂无同步日志</p>
+          </div>
+        `;
+        return;
+      }
+
+      const html = `
+        <div class="table-container">
+          <table>
+            <thead>
+              <tr>
+                <th>商店</th>
+                <th>模式</th>
+                <th>状态</th>
+                <th>开始时间</th>
+                <th>耗时</th>
+                <th>商品数</th>
+                <th>推荐数</th>
+                <th>Token</th>
+                <th>成本</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${logs.map(log => `
+                <tr>
+                  <td>
+                    <strong>${log.shopDomain}</strong><br>
+                    <small style="color: #999;">${log.plan}</small>
+                  </td>
+                  <td><span class="badge badge-info">${log.mode}</span></td>
+                  <td>${getStatusBadge(log.status)}</td>
+                  <td>${formatDate(log.startedAt)}</td>
+                  <td>${log.durationMs ? (log.durationMs / 1000).toFixed(2) + 's' : '-'}</td>
+                  <td>${log.productsScanned} / ${log.productsSynced}</td>
+                  <td>${log.recommendationsGenerated}</td>
+                  <td>${log.tokensUsed.toLocaleString()}</td>
+                  <td>$${log.estimatedCost.toFixed(4)}</td>
+                  <td>
+                    ${log.errorMessage ? `<button class="btn" onclick="showError('${escapeHtml(log.errorMessage)}', '${escapeHtml(log.errorStack || '')}')">查看错误</button>` : '-'}
+                  </td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+      `;
+
+      document.getElementById('logsContent').innerHTML = html;
+    }
+
+    // 渲染每日统计
+    function renderDaily() {
+      if (!statsData || !statsData.daily) {
+        document.getElementById('dailyContent').innerHTML = `
+          <div class="loading">
+            <div class="spinner"></div>
+            <p>加载每日统计...</p>
+          </div>
+        `;
+        return;
+      }
+
+      const { daily } = statsData;
+
+      if (daily.length === 0) {
+        document.getElementById('dailyContent').innerHTML = `
+          <div class="empty">
+            <div class="empty-icon">📊</div>
+            <p>暂无统计数据</p>
+          </div>
+        `;
+        return;
+      }
+
+      const html = `
+        <div class="table-container">
+          <table>
+            <thead>
+              <tr>
+                <th>日期</th>
+                <th>同步次数</th>
+                <th>Token消耗</th>
+                <th>成本</th>
+                <th>平均耗时</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${daily.map(day => `
+                <tr>
+                  <td><strong>${formatDate(day.date)}</strong></td>
+                  <td>${day.syncCount}</td>
+                  <td>${day.totalTokens.toLocaleString()}</td>
+                  <td>$${day.totalCost.toFixed(4)}</td>
+                  <td>${(day.avgDuration / 1000).toFixed(2)}s</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+      `;
+
+      document.getElementById('dailyContent').innerHTML = html;
+    }
+
+    // 加载商店列表
+    async function loadShopsList() {
+      if (!shopsData) return;
+
+      renderShopsList(shopsData);
+    }
+
+    // 渲染商店列表
+    function renderShopsList(shops) {
+      if (shops.length === 0) {
+        document.getElementById('shopsContent').innerHTML = `
+          <div class="empty">
+            <div class="empty-icon">🏪</div>
+            <p>暂无商店</p>
+          </div>
+        `;
+        return;
+      }
+
+      const html = `
+        <div class="shop-list">
+          ${shops.map(shop => `
+            <div class="shop-card">
+              <h4>${shop.domain}</h4>
+              <div class="info">
+                <span>计划:</span>
+                <span><strong>${shop.plan.toUpperCase()}</strong></span>
+              </div>
+              <div class="info">
+                <span>商品数:</span>
+                <span>${shop.productCount || 0}</span>
+              </div>
+              <div class="info">
+                <span>首次同步:</span>
+                <span>${shop.initialSyncDone ? '✅ 已完成' : '⏳ 未完成'}</span>
+              </div>
+              <div class="info">
+                <span>上次刷新:</span>
+                <span>${shop.lastRefreshAt ? formatDate(shop.lastRefreshAt) : '-'}</span>
+              </div>
+              <div class="info">
+                <span>创建时间:</span>
+                <span>${formatDate(shop.createdAt)}</span>
+              </div>
+            </div>
+          `).join('')}
+        </div>
+      `;
+
+      document.getElementById('shopsContent').innerHTML = html;
+    }
+
+    // 渲染图表
+    function renderCharts() {
+      if (!statsData || !statsData.daily || statsData.daily.length === 0) {
+        return;
+      }
+
+      const daily = statsData.daily.slice().reverse(); // 按时间正序排列
+      const labels = daily.map(d => formatDate(d.date).split(' ')[0]);
+
+      // 销毁旧图表
+      Object.values(charts).forEach(chart => {
+        if (chart) chart.destroy();
+      });
+
+      // Token消耗趋势图
+      const tokenCtx = document.getElementById('tokenChart').getContext('2d');
+      charts.token = new Chart(tokenCtx, {
+        type: 'line',
+        data: {
+          labels: labels,
+          datasets: [{
+            label: 'Token消耗',
+            data: daily.map(d => d.totalTokens),
+            borderColor: '#f59e0b',
+            backgroundColor: 'rgba(245, 158, 11, 0.1)',
+            tension: 0.4,
+            fill: true
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: true,
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              callbacks: {
+                label: (context) => `Token: ${context.parsed.y.toLocaleString()}`
+              }
+            }
+          },
+          scales: {
+            y: {
+              beginAtZero: true,
+              ticks: {
+                callback: (value) => value.toLocaleString()
+              }
+            }
+          }
+        }
+      });
+
+      // 商品数量趋势图
+      const productsCtx = document.getElementById('productsChart').getContext('2d');
+      charts.products = new Chart(productsCtx, {
+        type: 'bar',
+        data: {
+      abels: labels,
+          datasets: [{
+            label: '同步次数',
+            data: daily.map(d => d.syncCount),
+            backgroundColor: '#3b82f6',
+            borderRadius: 6
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: true,
+          plugins: {
+            legend: { display: false }
+          },
+          scales: {
+            y: {
+              beginAtZero: true,
+              ticks: {
+                stepSize: 1
+              }
+            }
+          }
+        }
+      });
+
+      // 成功率图表（基于日志数据）
+      const successData = calculateSuccessRate(daily);
+      const successCtx = document.getElementById('successChart').getContext('2d');
+      charts.success = new Chart(successCtx, {
+        type: 'line',
+        data: {
+          labels: labels,
+          datasets: [{
+            label: '成功率 (%)',
+            data: successData,
+            borderColor: '#10b981',
+            backgroundColor: 'rgba(16, 185, 129, 0.1)',
+            tension: 0.4,
+            fill: true
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: true,
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              callbacks: {
+                label: (context) => `成功率: ${context.parsed.y.toFixed(1)}%`
+              }
+            }
+          },
+          scales: {
+            y: {
+              beginAtZero: true,
+              max: 100,
+              ticks: {
+                callback: (value) => value + '%'
+              }
+            }
+          }
+        }
+      });
+
+      // 耗时趋势图
+      const durationCtx = document.getElementById('durationChart').getContext('2d');
+      charts.duration = new Chart(durationCtx, {
+        type: 'line',
+        data: {
+          labels: labels,
+          datasets: [{
+            label: '平均耗时 (秒)',
+            data: daily.map(d => (d.avgDuration / 1000).toFixed(2)),
+            borderColor: '#8b5cf6',
+            backgroundColor: 'rgba(139, 92, 246, 0.1)',
+            tension: 0.4,
+            fill: true
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: true,
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              callbacks: {
+                label: (context) => `耗时: ${context.parsed.y}秒`
+              }
+            }
+          },
+          scales: {
+            y: {
+              beginAtZero: true,
+              ticks: {
+                callback: (value) => value + 's'
+              }
+            }
+          }
+        }
+      });
+    }
+
+    // 计算成功率（假设所有同步都成功，实际应该从日志中统计）
+    function calculateSuccessRate(daily) {
+      // 简化版本：假设成功率为100%
+      // 实际应该从logsData中按日期统计成功/失败数量
+      return daily.map(d => {
+        if (!logsData) return 100;
+
+        const dayLogs = logsData.filter(log => {
+          const logDate = new Date(log.startedAt).toISOString().split('T')[0];
+          const targetDate = new Date(d.date).toISOString().split('T')[0];
+          return logDate === targetDate;
+        });
+
+        if (dayLogs.length === 0) return 100;
+
+        const successCount = dayLogs.filter(log => log.status === 'success').length;
+        return (successCount / dayLogs.length * 100).toFixed(1);
+      });
+    }
+
+    // 切换标签
+    function switchTab(tab) {
+      currentTab = tab;
+
+      // 更新按钮状态
+      document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+      event.target.classList.add('active');
+
+      // 更新内容显示
+      document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
+      document.getElementById(`${tab}Tab`).classList.add('active');
+
+      // 渲染对应内容
+      if (tab === 'charts') {
+        renderCharts();
+      } else if (tab === 'daily') {
+        renderDaily();
+      } else if (tab === 'shops') {
+        loadShopsList();
+      }
+    }
+
+    // 显示错误详情
+    function showError(message, stack) {
+      alert(`错误信息:\n${message}\n\n堆栈:\n${stack}`);
+    }
+
+    // 工具函数
+    function getStatusBadge(status) {
+      const badges = {
+        success: '<span class="badge badge-success">成功</span>',
+        failed: '<span class="badge badge-danger">失败</span>',
+        started: '<span class="badge badge-warning">进行中</span>'
+      };
+      return badges[status] || status;
+    }
+
+    function formatDate(dateStr) {
+      const date = new Date(dateStr);
+      return date.toLocaleString('zh-CN', {
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit'
+      });
+    }
+
+    function escapeHtml(text) {
+      if (!text) return '';
+      return text.replace(/'/g, "\\'").replace(/"/g, '\\"').replace(/\n/g, '\\n');
+    }
+
+    // 页面加载时初始化
+    window.addEventListener('DOMContentLoaded', init);
+  </script>
+</body>
+</html>

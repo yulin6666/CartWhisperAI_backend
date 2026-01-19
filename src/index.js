@@ -85,9 +85,158 @@ async function initDatabase() {
 
     await client.query(`CREATE INDEX IF NOT EXISTS "Shop_plan_idx" ON "Shop"("plan")`);
 
-    console.log('[DB] Ready');
+    // ============ 监控表 ============
+    // SyncLog - 记录每次同步操作
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS "SyncLog" (
+        "id" TEXT PRIMARY KEY,
+        "shopId" TEXT NOT NULL REFERENCES "Shop"("id") ON DELETE CASCADE,
+        "mode" TEXT NOT NULL,
+        "status" TEXT NOT NULL,
+        "startedAt" TIMESTAMP DEFAULT NOW(),
+        "completedAt" TIMESTAMP,
+        "durationMs" INTEGER,
+        "productsScanned" INTEGER DEFAULT 0,
+        "productsSynced" INTEGER DEFAULT 0,
+        "recommendationsGenerated" INTEGER DEFAULT 0,
+        "tokensUsed" INTEGER DEFAULT 0,
+        "estimatedCost" FLOAT DEFAULT 0,
+        "errorMessage" TEXT,
+        "errorStack" TEXT
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS "SyncLog_shopId_idx" ON "SyncLog"("shopId", "startedAt")`);
+    await client.query(`CREATE INDEX IF NOT EXISTS "SyncLog_status_idx" ON "SyncLog"("status")`);
+
+    // ApiLog - 记录API调用（可选，用于详细追踪）
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS "ApiLog" (
+        "id" TEXT PRIMARY KEY,
+        "shopId" TEXT REFERENCES "Shop"("id") ON DELETE CASCADE,
+        "endpoint" TEXT NOT NULL,
+        "method" TEXT NOT NULL,
+        "startedAt" TIMESTAMP DEFAULT NOW(),
+        "durationMs" INTEGER NOT NULL,
+        "statusCode" INTEGER NOT NULL,
+        "success" BOOLEAN NOT NULL,
+        "tokensUsed" INTEGER DEFAULT 0
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS "ApiLog_shopId_idx" ON "ApiLog"("shopId", "startedAt")`);
+    await client.query(`CREATE INDEX IF NOT EXISTS "ApiLog_endpoint_idx" ON "ApiLog"("endpoint")`);
+
+    console.log('[DB] Ready (with monitoring tables)');
   } finally {
     client.release();
+  }
+}
+
+// ============ 监控工具类 ============
+class SyncMonitor {
+  constructor(shopId, mode) {
+    this.shopId = shopId;
+    this.mode = mode;
+    this.logId = `synclog_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
+    this.startTime = Date.now();
+    this.metrics = {
+      productsScanned: 0,
+      productsSynced: 0,
+      recommendationsGenerated: 0,
+      tokensUsed: 0,
+    };
+  }
+
+  async start() {
+    try {
+      await pool.query(
+        `INSERT INTO "SyncLog" ("id", "shopId", "mode", "status", "startedAt") VALUES ($1, $2, $3, $4, NOW())`,
+        [this.logId, this.shopId, this.mode, 'started']
+      );
+      console.log(`[Monitor] Sync started: ${this.logId}`);
+      return this.logId;
+    } catch (error) {
+      console.error('[Monitor] Failed to start:', error);
+    }
+  }
+
+  updateMetrics(updates) {
+    Object.assign(this.metrics, updates);
+  }
+
+  recordTokenUsage(tokens) {
+    this.metrics.tokensUsed += tokens || 0;
+  }
+
+  calculateCost(tokens) {
+    // DeepSeek 定价: $0.14/1M input tokens, $0.28/1M output tokens
+    // 简化计算，假设平均 $0.21/1M tokens
+    const costPerMillion = 0.21;
+    return (tokens / 1_000_000) * costPerMillion;
+  }
+
+  async success() {
+    const durationMs = Date.now() - this.startTime;
+    const estimatedCost = this.calculateCost(this.metrics.tokensUsed);
+
+    try {
+      await pool.query(
+        `UPDATE "SyncLog" SET
+          "status" = $1,
+          "completedAt" = NOW(),
+          "durationMs" = $2,
+          "productsScanned" = $3,
+          "productsSynced" = $4,
+          "recommendationsGenerated" = $5,
+          "tokensUsed" = $6,
+          "estimatedCost" = $7
+        WHERE "id" = $8`,
+        ['success', durationMs, this.metrics.productsScanned, this.metrics.productsSynced,
+         this.metrics.recommendationsGenerated, this.metrics.tokensUsed, estimatedCost, this.logId]
+      );
+      console.log(`[Monitor] Sync completed: ${this.logId} (${durationMs}ms, ${this.metrics.tokensUsed} tokens, $${estimatedCost.toFixed(4)})`);
+    } catch (error) {
+      console.error('[Monitor] Failed to update success:', error);
+    }
+  }
+
+  async fail(error) {
+    const durationMs = Date.now() - this.startTime;
+
+    try {
+      await pool.query(
+        `UPDATE "SyncLog" SET
+          "status" = $1,
+          "completedAt" = NOW(),
+          "durationMs" = $2,
+          "productsScanned" = $3,
+          "productsSynced" = $4,
+          "recommendationsGenerated" = $5,
+          "tokensUsed" = $6,
+          "errorMessage" = $7,
+          "errorStack" = $8
+        WHERE "id" = $9`,
+        ['failed', durationMs, this.metrics.productsScanned, this.metrics.productsSynced,
+         this.metrics.recommendationsGenerated, this.metrics.tokensUsed,
+         error.message, error.stack, this.logId]
+      );
+      console.log(`[Monitor] Sync failed: ${this.logId} - ${error.message}`);
+    } catch (err) {
+      console.error('[Monitor] Failed to update failure:', err);
+    }
+  }
+}
+
+// API日志记录辅助函数
+async function logApiCall(shopId, endpoint, method, durationMs, statusCode, success, tokensUsed = 0) {
+  try {
+    const logId = `apilog_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
+    await pool.query(
+      `INSERT INTO "ApiLog" ("id", "shopId", "endpoint", "method", "startedAt", "durationMs", "statusCode", "success", "tokensUsed")
+       VALUES ($1, $2, $3, $4, NOW(), $5, $6, $7, $8)`,
+      [logId, shopId, endpoint, method, durationMs, statusCode, success, tokensUsed]
+    );
+  } catch (error) {
+    console.error('[Monitor] Failed to log API call:', error);
   }
 }
 
@@ -424,14 +573,33 @@ function canRefresh(shop) {
 
 app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
   const client = await pool.connect();
-  try {
-    // mode: 'auto' (default), 'refresh' (force regenerate all)
-    const { products, regenerate, mode = 'auto' } = req.body;
-    if (!Array.isArray(products) || !products.length) return res.status(400).json({ error: 'Products required' });
 
-    const shopId = req.shop.id;
-    const shop = req.shop;
-    const isFirstSync = !shop.initialSyncDone;
+  // 创建监控实例
+  const { products, regenerate, mode = 'auto' } = req.body;
+  const shopId = req.shop.id;
+  const shop = req.shop;
+  const isFirstSync = !shop.initialSyncDone;
+
+  // 确定实际模式用于监控
+  let monitorMode = mode;
+  if (isFirstSync) {
+    monitorMode = 'initial';
+  } else if (mode === 'refresh' || regenerate) {
+    monitorMode = 'refresh';
+  } else {
+    monitorMode = 'incremental';
+  }
+
+  const monitor = new SyncMonitor(shopId, monitorMode);
+  await monitor.start();
+
+  try {
+    if (!Array.isArray(products) || !products.length) {
+      await monitor.fail(new Error('Products required'));
+      return res.status(400).json({ error: 'Products required' });
+    }
+
+    monitor.updateMetrics({ productsScanned: products.length });
 
     // Check refresh rate limit for manual refresh
     if (mode === 'refresh' || regenerate) {
@@ -549,6 +717,13 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
     console.log(`[Sync] Done: ${saved.length} products, ${count} new recommendations, ${totalRecs.rows[0].count} total, mode=${actualMode}`);
     cache.clear();
 
+    // 更新监控指标
+    monitor.updateMetrics({
+      productsSynced: saved.length,
+      recommendationsGenerated: count
+    });
+    await monitor.success();
+
     // Calculate next refresh time
     const refreshCheck = canRefresh({ ...shop, lastRefreshAt: updateFields.lastRefreshAt || shop.lastRefreshAt });
 
@@ -563,6 +738,7 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
     });
   } catch (e) {
     console.error('[Sync] Error:', e);
+    await monitor.fail(e);
     res.status(500).json({ error: e.message });
   } finally {
     client.release();
@@ -1316,6 +1492,221 @@ app.post('/api/shops/:domain/cancel-subscription', async (req, res) => {
     res.json({ success: true, plan: 'free' });
   } catch (e) {
     console.error('[Plan] Error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ============ 监控 API 端点 ============
+
+// 获取同步日志列表
+app.get('/api/monitoring/sync-logs', auth, async (req, res) => {
+  try {
+    const shopId = req.shop.id;
+    const { limit = 100, offset = 0, status } = req.query;
+
+    let query = `
+      SELECT sl.*, s.domain as "shopDomain"
+      FROM "SyncLog" sl
+      JOIN "Shop" s ON sl."shopId" = s.id
+      WHERE sl."shopId" = $1
+    `;
+    const params = [shopId];
+
+    if (status) {
+      query += ` AND sl."status" = $${params.length + 1}`;
+      params.push(status);
+    }
+
+    query += ` ORDER BY sl."startedAt" DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+    params.push(parseInt(limit), parseInt(offset));
+
+    const result = await pool.query(query, params);
+
+    // 获取总数
+    const countResult = await pool.query(
+      `SELECT COUNT(*) FROM "SyncLog" WHERE "shopId" = $1 ${status ? 'AND "status" = $2' : ''}`,
+      status ? [shopId, status] : [shopId]
+    );
+
+    res.json({
+      success: true,
+      logs: result.rows,
+      pagination: {
+        total: parseInt(countResult.rows[0].count),
+        limit: parseInt(limit),
+        offset: parseInt(offset)
+      }
+    });
+  } catch (e) {
+    console.error('[Monitoring] Error fetching sync logs:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 获取所有商店的同步日志（管理员视图）
+app.get('/api/monitoring/all-sync-logs', async (req, res) => {
+  try {
+    const { limit = 100, offset = 0, shopDomain, status, days = 7 } = req.query;
+
+    const startDate = new Date();
+    startDate.setDate(startDate.getDate() - parseInt(days));
+
+    let query = `
+      SELECT sl.*, s.domain as "shopDomain", s.plan
+      FROM "SyncLog" sl
+      JOIN "Shop" s ON sl."shopId" = s.id
+      WHERE sl."startedAt" >= $1
+    `;
+    const params = [startDate];
+
+    if (shopDomain) {
+      query += ` AND s.domain = $${params.length + 1}`;
+      params.push(shopDomain);
+    }
+
+    if (status) {
+      query += ` AND sl."status" = $${params.length + 1}`;
+      params.push(status);
+    }
+
+    query += ` ORDER BY sl."startedAt" DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+    params.push(parseInt(limit), parseInt(offset));
+
+    const result = await pool.query(query, params);
+
+    res.json({
+      success: true,
+      logs: result.rows,
+      pagination: {
+        limit: parseInt(limit),
+        offset: parseInt(offset),
+        returned: result.rows.length
+      }
+    });
+  } catch (e) {
+    console.error('[Monitoring] Error fetching all sync logs:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 获取监控统计数据
+app.get('/api/monitoring/stats', async (req, res) => {
+  try {
+    const { shopDomain, days = 7 } = req.query;
+
+    const startDate = new Date();
+    startDate.setDate(startDate.getDate() - parseInt(days));
+
+    let shopFilter = '';
+    const params = [startDate];
+
+    if (shopDomain) {
+      shopFilter = ` AND s.domain = $2`;
+      params.push(shopDomain);
+    }
+
+    // 总体统计
+    const summaryQuery = `
+      SELECT
+        COUNT(*) as "totalSyncs",
+        COUNT(CASE WHEN sl."status" = 'success' THEN 1 END) as "successfulSyncs",
+        COUNT(CASE WHEN sl."status" = 'failed' THEN 1 END) as "failedSyncs",
+        SUM(sl."tokensUsed") as "totalTokens",
+        SUM(sl."estimatedCost") as "totalCost",
+        AVG(sl."durationMs") as "avgDuration",
+        SUM(sl."recommendationsGenerated") as "totalRecommendations"
+      FROM "SyncLog" sl
+      JOIN "Shop" s ON sl."shopId" = s.id
+      WHERE sl."startedAt" >= $1 ${shopFilter}
+    `;
+
+    const summary = await pool.query(summaryQuery, params);
+
+    // 按天统计
+    const dailyQuery = `
+      SELECT
+        DATE(sl."startedAt") as date,
+        COUNT(*) as "syncCount",
+        SUM(sl."tokensUsed") as "totalTokens",
+        SUM(sl."estimatedCost") as "totalCost",
+        AVG(sl."durationMs") as "avgDuration"
+      FROM "SyncLog" sl
+      JOIN "Shop" s ON sl."shopId" = s.id
+      WHERE sl."startedAt" >= $1 AND sl."status" = 'success' ${shopFilter}
+      GROUP BY DATE(sl."startedAt")
+      ORDER BY date DESC
+    `;
+
+    const daily = await pool.query(dailyQuery, params);
+
+    // 按商店统计
+    const byShopQuery = `
+      SELECT
+        s.domain,
+        s.plan,
+        COUNT(*) as "syncCount",
+        SUM(sl."tokensUsed") as "totalTokens",
+        SUM(sl."estimatedCost") as "totalCost",
+        MAX(sl."startedAt") as "lastSync"
+      FROM "SyncLog" sl
+      JOIN "Shop" s ON sl."shopId" = s.id
+      WHERE sl."startedAt" >= $1 AND sl."status" = 'success' ${shopFilter}
+      GROUP BY s.domain, s.plan
+      ORDER BY "totalCost" DESC
+      LIMIT 20
+    `;
+
+    const byShop = await pool.query(byShopQuery, params);
+
+    res.json({
+      success: true,
+      period: { days: parseInt(days), startDate },
+      summary: {
+        totalSyncs: parseInt(summary.rows[0].totalSyncs || 0),
+        successfulSyncs: parseInt(summary.rows[0].successfulSyncs || 0),
+        failedSyncs: parseInt(summary.rows[0].failedSyncs || 0),
+        totalTokens: parseInt(summary.rows[0].totalTokens || 0),
+        totalCost: parseFloat(summary.rows[0].totalCost || 0),
+        avgDuration: parseFloat(summary.rows[0].avgDuration || 0),
+        totalRecommendations: parseInt(summary.rows[0].totalRecommendations || 0)
+      },
+      daily: daily.rows.map(r => ({
+        date: r.date,
+        syncCount: parseInt(r.syncCount),
+        totalTokens: parseInt(r.totalTokens || 0),
+        totalCost: parseFloat(r.totalCost || 0),
+        avgDuration: parseFloat(r.avgDuration || 0)
+      })),
+      byShop: byShop.rows.map(r => ({
+        domain: r.domain,
+        plan: r.plan,
+        syncCount: parseInt(r.syncCount),
+        totalTokens: parseInt(r.totalTokens || 0),
+        totalCost: parseFloat(r.totalCost || 0),
+        lastSync: r.lastSync
+      }))
+    });
+  } catch (e) {
+    console.error('[Monitoring] Error fetching stats:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 获取商店列表（用于管理界面筛选）
+app.get('/api/monitoring/shops', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT domain, plan, "productCount", "initialSyncDone", "lastRefreshAt", "createdAt"
+      FROM "Shop"
+      ORDER BY "createdAt" DESC
+    `);
+
+    res.json({
+      success: true,
+      shops: result.rows
+    });
+  } catch (e) {
+    console.error('[Monitoring] Error fetching shops:', e);
     res.status(500).json({ error: e.message });
   }
 });
