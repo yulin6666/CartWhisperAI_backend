@@ -369,6 +369,157 @@
       white-space: pre-wrap;
       word-wrap: break-word;
     }
+
+    .recommendations-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 20px;
+      padding: 15px;
+      background: #f9fafb;
+      border-radius: 8px;
+    }
+
+    .recommendations-header .info {
+      display: flex;
+      gap: 30px;
+    }
+
+    .recommendations-header .info-item {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .recommendations-header .info-item label {
+      font-size: 12px;
+      color: #666;
+      text-transform: uppercase;
+      margin-bottom: 5px;
+    }
+
+    .recommendations-header .info-item .value {
+      font-size: 24px;
+      font-weight: 700;
+      color: #333;
+    }
+
+    .btn-danger {
+      background: #ef4444;
+      color: white;
+    }
+
+    .btn-danger:hover {
+      background: #dc2626;
+      transform: translateY(-2px);
+      box-shadow: 0 4px 12px rgba(239, 68, 68, 0.4);
+    }
+
+    .recommendation-card {
+      background: white;
+      border: 1px solid #e0e0e0;
+      border-radius: 8px;
+      padding: 20px;
+      margin-bottom: 15px;
+      transition: all 0.3s;
+    }
+
+    .recommendation-card:hover {
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+      transform: translateY(-2px);
+    }
+
+    .recommendation-card-header {
+      display: flex;
+      gap: 15px;
+      align-items: center;
+      margin-bottom: 15px;
+      padding-bottom: 15px;
+      border-bottom: 2px solid #f0f0f0;
+    }
+
+    .product-image {
+      width: 80px;
+      height: 80px;
+      object-fit: cover;
+      border-radius: 8px;
+      border: 2px solid #e0e0e0;
+    }
+
+    .product-info {
+      flex: 1;
+    }
+
+    .product-info h4 {
+      color: #333;
+      font-size: 16px;
+      margin-bottom: 5px;
+      font-weight: 600;
+    }
+
+    .product-info .product-id {
+      color: #999;
+      font-size: 12px;
+      font-family: 'Courier New', monospace;
+    }
+
+    .recommendations-list {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: 15px;
+    }
+
+    .recommendation-item {
+      background: #f9fafb;
+      border-radius: 8px;
+      padding: 15px;
+      border-left: 3px solid #667eea;
+    }
+
+    .recommendation-item img {
+      width: 100%;
+      height: 120px;
+      object-fit: cover;
+      border-radius: 6px;
+      margin-bottom: 10px;
+    }
+
+    .recommendation-item h5 {
+      color: #333;
+      font-size: 14px;
+      margin-bottom: 5px;
+      font-weight: 600;
+      line-height: 1.3;
+    }
+
+    .recommendation-item .reason {
+      color: #666;
+      font-size: 12px;
+      line-height: 1.4;
+      margin-top: 8px;
+      padding-top: 8px;
+      border-top: 1px solid #e0e0e0;
+    }
+
+    .api-key-input {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 20px;
+      align-items: center;
+    }
+
+    .api-key-input input {
+      flex: 1;
+      padding: 10px 15px;
+      border: 2px solid #e0e0e0;
+      border-radius: 8px;
+      font-size: 14px;
+      font-family: 'Courier New', monospace;
+    }
+
+    .api-key-input input:focus {
+      outline: none;
+      border-color: #667eea;
+    }
   </style>
 </head>
 <body>
@@ -441,6 +592,7 @@
         <button class="tab-btn" onclick="switchTab('logs')">📋 同步日志</button>
         <button class="tab-btn" onclick="switchTab('daily')">📊 每日统计</button>
         <button class="tab-btn" onclick="switchTab('shops')">🏪 商店列表</button>
+        <button class="tab-btn" onclick="switchTab('recommendations')">🎯 推荐管理</button>
       </div>
 
       <!-- Charts Tab -->
@@ -494,6 +646,16 @@
           </div>
         </div>
       </div>
+
+      <!-- Recommendations Tab -->
+      <div id="recommendationsTab" class="tab-content">
+        <div id="recommendationsContent">
+          <div class="loading">
+            <div class="spinner"></div>
+            <p>加载推荐数据...</p>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -503,6 +665,8 @@
     let statsData = null;
     let logsData = null;
     let shopsData = null;
+    let recommendationsData = null;
+    let currentApiKey = '';
     let charts = {};
 
     // 初始化
@@ -987,6 +1151,220 @@
         renderDaily();
       } else if (tab === 'shops') {
         loadShopsList();
+      } else if (tab === 'recommendations') {
+        renderRecommendationsUI();
+      }
+    }
+
+    // 渲染推荐管理UI
+    function renderRecommendationsUI() {
+      document.getElementById('recommendationsContent').innerHTML = `
+        <div class="api-key-input">
+          <input
+            type="text"
+            id="apiKeyInput"
+            placeholder="请输入商店API Key (例如: shop_xxx...)"
+            value="${currentApiKey}"
+            onchange="currentApiKey = this.value"
+          />
+          <button class="btn btn-primary" onclick="loadRecommendations()">🔍 查询推荐</button>
+        </div>
+        <div id="recommendationsData">
+          <div class="empty">
+            <div class="empty-icon">🎯</div>
+            <p>请输入API Key查询推荐数据</p>
+          </div>
+        </div>
+      `;
+    }
+
+    // 加载推荐数据
+    async function loadRecommendations() {
+      const apiKey = document.getElementById('apiKeyInput').value.trim();
+
+      if (!apiKey) {
+        alert('请输入API Key');
+        return;
+      }
+
+      currentApiKey = apiKey;
+
+      document.getElementById('recommendationsData').innerHTML = `
+        <div class="loading">
+          <div class="spinner"></div>
+          <p>加载推荐数据...</p>
+        </div>
+      `;
+
+      try {
+        const response = await fetch(`${API_BASE}/api/recommendations?limit=9999`, {
+          headers: {
+            'X-API-Key': apiKey
+          }
+        });
+
+        if (!response.ok) {
+          const error = await response.json().catch(() => ({ error: 'Unknown error' }));
+          throw new Error(error.error || `HTTP ${response.status}`);
+        }
+
+        const data = await response.json();
+        recommendationsData = data;
+        renderRecommendations(data);
+      } catch (error) {
+        console.error('Failed to load recommendations:', error);
+        document.getElementById('recommendationsData').innerHTML = `
+          <div class="error">
+            加载推荐数据失败: ${error.message}
+            <br><br>
+            <small>请检查API Key是否正确</small>
+          </div>
+        `;
+      }
+    }
+
+    // 渲染推荐数据
+    function renderRecommendations(data) {
+      if (!data.recommendations || data.recommendations.length === 0) {
+        document.getElementById('recommendationsData').innerHTML = `
+          <div class="recommendations-header">
+            <div class="info">
+              <div class="info-item">
+                <label>商店</label>
+                <div class="value">${data.shop}</div>
+              </div>
+              <div class="info-item">
+                <label>商品数</label>
+                <div class="value">${data.stats.products}</div>
+              </div>
+              <div class="info-item">
+                <label>推荐数</label>
+                <div class="value">0</div>
+              </div>
+            </div>
+            <button class="btn btn-danger" disabled style="opacity: 0.5;">
+              🗑️ 清空所有推荐
+            </button>
+          </div>
+          <div class="empty">
+            <div class="empty-icon">📭</div>
+            <p>暂无推荐数据</p>
+            <small style="color: #999;">当前商店还没有生成任何推荐</small>
+          </div>
+        `;
+        return;
+      }
+
+      // 按源商品分组
+      const grouped = {};
+      data.recommendations.forEach(rec => {
+        const key = rec.sourceProductId;
+        if (!grouped[key]) {
+          grouped[key] = {
+            source: {
+              id: rec.sourceProductId,
+              title: rec.sourceTitle,
+              image: rec.sourceImage
+            },
+            recommendations: []
+          };
+        }
+        grouped[key].recommendations.push({
+          id: rec.targetProductId,
+          title: rec.targetTitle,
+          image: rec.targetImage,
+          reason: rec.reason,
+          createdAt: rec.createdAt
+        });
+      });
+
+      const html = `
+        <div class="recommendations-header">
+          <div class="info">
+            <div class="info-item">
+              <label>商店</label>
+              <div class="value" style="font-size: 18px;">${data.shop}</div>
+            </div>
+            <div class="info-item">
+              <label>商品数</label>
+              <div class="value">${data.stats.products}</div>
+            </div>
+            <div class="info-item">
+              <label>推荐数</label>
+              <div class="value">${data.stats.recommendations}</div>
+            </div>
+            <div class="info-item">
+              <label>有推荐的商品</label>
+              <div class="value">${Object.keys(grouped).length}</div>
+            </div>
+          </div>
+          <button class="btn btn-danger" onclick="clearRecommendations()">
+            🗑️ 清空所有推荐
+          </button>
+        </div>
+        <div>
+          ${Object.values(grouped).map(group => `
+            <div class="recommendation-card">
+              <div class="recommendation-card-header">
+                ${group.source.image ? `<img src="${group.source.image}" class="product-image" alt="${group.source.title}">` : '<div class="product-image" style="background: #f0f0f0; display: flex; align-items: center; justify-content: center; color: #999;">无图片</div>'}
+                <div class="product-info">
+                  <h4>${group.source.title}</h4>
+                  <div class="product-id">${group.source.id}</div>
+                  <div style="margin-top: 5px;">
+                    <span class="badge badge-info">${group.recommendations.length} 个推荐</span>
+                  </div>
+                </div>
+              </div>
+              <div class="recommendations-list">
+                ${group.recommendations.map(rec => `
+                  <div class="recommendation-item">
+                    ${rec.image ? `<img src="${rec.image}" alt="${rec.title}">` : '<div style="width: 100%; height: 120px; background: #f0f0f0; border-radius: 6px; display: flex; align-items: center; justify-content: center; color: #999; margin-bottom: 10px;">无图片</div>'}
+                    <h5>${rec.title}</h5>
+                    <div class="product-id">${rec.id}</div>
+                    ${rec.reason ? `<div class="reason">${rec.reason}</div>` : ''}
+                  </div>
+                `).join('')}
+              </div>
+            </div>
+          `).join('')}
+        </div>
+      `;
+
+      document.getElementById('recommendationsData').innerHTML = html;
+    }
+
+    // 清空推荐
+    async function clearRecommendations() {
+      if (!currentApiKey) {
+        alert('请先输入API Key');
+        return;
+      }
+
+      if (!confirm('确定要清空所有推荐吗？此操作不可恢复！')) {
+        return;
+      }
+
+      try {
+        const response = await fetch(`${API_BASE}/api/recommendations`, {
+          method: 'DELETE',
+          headers: {
+            'X-API-Key': currentApiKey
+          }
+        });
+
+        if (!response.ok) {
+          const error = await response.json().catch(() => ({ error: 'Unknown error' }));
+          throw new Error(error.error || `HTTP ${response.status}`);
+        }
+
+        const result = await response.json();
+        alert(`成功删除 ${result.deleted} 条推荐！`);
+
+        // 重新加载推荐数据
+        await loadRecommendations();
+      } catch (error) {
+        console.error('Failed to clear recommendations:', error);
+        alert(`清空推荐失败: ${error.message}`);
       }
     }
 
