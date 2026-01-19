@@ -78,6 +78,9 @@ async function initDatabase() {
     // API usage tracking
     await addColumn('Shop', 'apiCallsToday', 'INTEGER', '0');
     await addColumn('Shop', 'apiCallsDate', 'DATE', null);
+    // Monthly refresh tracking
+    await addColumn('Shop', 'refreshCount', 'INTEGER', '0');
+    await addColumn('Shop', 'refreshMonth', 'TEXT', null);
 
     // Recommendation tracking (impressions/clicks)
     await addColumn('Recommendation', 'impressions', 'INTEGER', '0');
@@ -614,24 +617,50 @@ app.get('/api/health', async (req, res) => {
 
 // Helper: Check refresh rate limit
 function canRefresh(shop) {
-  if (!shop.lastRefreshAt) return { allowed: true };
-
-  const lastRefresh = new Date(shop.lastRefreshAt);
-  const now = new Date();
-  const daysSinceRefresh = (now - lastRefresh) / (1000 * 60 * 60 * 24);
-
   const plan = shop.plan || 'free';
-  const limitDays = plan === 'pro' ? 7 : 30; // Pro: 7 days, Free: 30 days
 
-  if (daysSinceRefresh < limitDays) {
-    const nextRefreshDate = new Date(lastRefresh.getTime() + limitDays * 24 * 60 * 60 * 1000);
+  // 月度刷新次数限制
+  const REFRESH_LIMITS = {
+    free: 0,   // 0次/月（不允许）
+    pro: 3,    // 3次/月
+    max: 10    // 10次/月
+  };
+
+  const limit = REFRESH_LIMITS[plan] || REFRESH_LIMITS.free;
+  const currentMonth = new Date().toISOString().slice(0, 7); // YYYY-MM
+
+  // 检查是否是新的月份，重置计数
+  let refreshCount = shop.refreshCount || 0;
+  const lastMonth = shop.refreshMonth;
+
+  if (lastMonth !== currentMonth) {
+    // 新的月份，重置计数
+    refreshCount = 0;
+  }
+
+  // 检查是否超过限额
+  if (refreshCount >= limit) {
+    // 计算下次可刷新时间（下个月1号）
+    const nextMonth = new Date(currentMonth + '-01');
+    nextMonth.setMonth(nextMonth.getMonth() + 1);
+
     return {
       allowed: false,
-      nextRefreshAt: nextRefreshDate.toISOString(),
-      daysRemaining: Math.ceil(limitDays - daysSinceRefresh)
+      limit,
+      used: refreshCount,
+      remaining: 0,
+      nextRefreshAt: nextMonth.toISOString(),
+      plan
     };
   }
-  return { allowed: true };
+
+  return {
+    allowed: true,
+    limit,
+    used: refreshCount,
+    remaining: limit - refreshCount,
+    plan
+  };
 }
 
 app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
@@ -670,9 +699,11 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
       if (!refreshCheck.allowed) {
         return res.status(429).json({
           error: 'Refresh rate limit exceeded',
+          limit: refreshCheck.limit,
+          used: refreshCheck.used,
+          remaining: refreshCheck.remaining,
           nextRefreshAt: refreshCheck.nextRefreshAt,
-          daysRemaining: refreshCheck.daysRemaining,
-          plan: shop.plan || 'free'
+          plan: refreshCheck.plan
         });
       }
     }
@@ -765,11 +796,25 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
       updatedAt: new Date()
     };
 
+    const currentMonth = new Date().toISOString().slice(0, 7); // YYYY-MM
+
     if (actualMode === 'initial') {
       updateFields.initialSyncDone = true;
       updateFields.lastRefreshAt = new Date();
     } else if (actualMode === 'refresh') {
       updateFields.lastRefreshAt = new Date();
+
+      // 更新月度刷新计数
+      const lastMonth = shop.refreshMonth;
+      if (lastMonth !== currentMonth) {
+        // 新月份，重置为1
+        updateFields.refreshCount = 1;
+        updateFields.refreshMonth = currentMonth;
+      } else {
+        // 同一月份，增加计数
+        updateFields.refreshCount = (shop.refreshCount || 0) + 1;
+        updateFields.refreshMonth = currentMonth;
+      }
     }
 
     await client.query(`
@@ -777,13 +822,17 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
         "productCount" = $1,
         "updatedAt" = $2,
         "initialSyncDone" = COALESCE($3, "initialSyncDone"),
-        "lastRefreshAt" = COALESCE($4, "lastRefreshAt")
-      WHERE "id" = $5
+        "lastRefreshAt" = COALESCE($4, "lastRefreshAt"),
+        "refreshCount" = COALESCE($5, "refreshCount"),
+        "refreshMonth" = COALESCE($6, "refreshMonth")
+      WHERE "id" = $7
     `, [
       updateFields.productCount,
       updateFields.updatedAt,
       updateFields.initialSyncDone || null,
       updateFields.lastRefreshAt || null,
+      updateFields.refreshCount !== undefined ? updateFields.refreshCount : null,
+      updateFields.refreshMonth || null,
       shopId
     ]);
 
@@ -797,8 +846,14 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
     });
     await monitor.success();
 
-    // Calculate next refresh time
-    const refreshCheck = canRefresh({ ...shop, lastRefreshAt: updateFields.lastRefreshAt || shop.lastRefreshAt });
+    // Calculate next refresh time with updated shop data
+    const updatedShop = {
+      ...shop,
+      lastRefreshAt: updateFields.lastRefreshAt || shop.lastRefreshAt,
+      refreshCount: updateFields.refreshCount !== undefined ? updateFields.refreshCount : shop.refreshCount,
+      refreshMonth: updateFields.refreshMonth || shop.refreshMonth
+    };
+    const refreshCheck = canRefresh(updatedShop);
 
     res.json({
       success: true,
@@ -806,7 +861,12 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
       products: saved.length,
       newRecommendations: count,
       totalRecommendations: parseInt(totalRecs.rows[0].count),
-      nextRefreshAt: refreshCheck.nextRefreshAt,
+      refreshLimit: {
+        limit: refreshCheck.limit,
+        used: refreshCheck.used,
+        remaining: refreshCheck.remaining,
+        nextRefreshAt: refreshCheck.nextRefreshAt
+      },
       canRefresh: refreshCheck.allowed
     });
   } catch (e) {
@@ -951,9 +1011,14 @@ app.get('/api/shops/sync-status', auth, async (req, res) => {
         productCount: parseInt(productCount.rows[0].count),
         recommendationCount: parseInt(recCount.rows[0].count),
         plan: shop.plan || 'free',
-        canRefresh: refreshStatus.allowed,
-        nextRefreshAt: refreshStatus.nextRefreshAt,
-        daysUntilRefresh: refreshStatus.daysRemaining,
+        // 刷新限制信息
+        refreshLimit: {
+          limit: refreshStatus.limit,
+          used: refreshStatus.used,
+          remaining: refreshStatus.remaining,
+          canRefresh: refreshStatus.allowed,
+          nextRefreshAt: refreshStatus.nextRefreshAt
+        },
         // API usage
         apiUsage: {
           used: apiCallsToday,
