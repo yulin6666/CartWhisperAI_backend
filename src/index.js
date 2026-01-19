@@ -338,7 +338,11 @@ async function callDeepSeek(prompt) {
     });
     if (!res.ok) return null;
     const data = await res.json();
-    return data.choices?.[0]?.message?.content;
+    // 返回完整数据，包括content和usage
+    return {
+      content: data.choices?.[0]?.message?.content,
+      usage: data.usage || null
+    };
   } catch (e) {
     console.error('[AI] Error:', e.message);
     return null;
@@ -363,6 +367,7 @@ async function generateRecommendations(products, allProducts = null) {
   // allProducts: 所有可选的推荐目标商品（如果为空，则使用 products）
   const targetPool = allProducts || products;
   const results = [];
+  let totalTokens = 0; // 累加token消耗
 
   // 简化商品描述，提取关键信息
   const getGender = (p) => {
@@ -456,22 +461,29 @@ Return JSON with 3 recommendations in ENGLISH ONLY:
 
     const aiRes = await callDeepSeek(prompt);
     if (aiRes) {
-      try {
-        const json = aiRes.match(/\{[\s\S]*\}/)?.[0];
-        const parsed = JSON.parse(json);
-        const seen = new Set(); // 避免重复推荐
-        for (const rec of (parsed.recommendations || []).slice(0, 3)) {
-          const productId = String(rec.productId);
-          if (seen.has(productId)) continue;
+      // 累加token消耗
+      if (aiRes.usage && aiRes.usage.total_tokens) {
+        totalTokens += aiRes.usage.total_tokens;
+      }
 
-          const target = others.find(p => p.productId === productId);
-          if (target) {
-            seen.add(productId);
-            results.push({
-              sourceId: product.productId,
-              targetId: target.productId,
-              reason: rec.reason || 'Recommended pairing'
-            });
+      try {
+        const json = aiRes.content?.match(/\{[\s\S]*\}/)?.[0];
+        if (json) {
+          const parsed = JSON.parse(json);
+          const seen = new Set(); // 避免重复推荐
+          for (const rec of (parsed.recommendations || []).slice(0, 3)) {
+            const productId = String(rec.productId);
+            if (seen.has(productId)) continue;
+
+            const target = others.find(p => p.productId === productId);
+            if (target) {
+              seen.add(productId);
+              results.push({
+                sourceId: product.productId,
+                targetId: target.productId,
+                reason: rec.reason || 'Recommended pairing'
+              });
+            }
           }
         }
       } catch (e) {
@@ -494,7 +506,7 @@ Return JSON with 3 recommendations in ENGLISH ONLY:
     }
     if (process.env.DEEPSEEK_API_KEY) await new Promise(r => setTimeout(r, 200));
   }
-  return results;
+  return { recommendations: results, totalTokens };
 }
 
 // ============ Routes ============
@@ -666,7 +678,13 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
     let count = 0;
     if (productsNeedingRecs.length > 0) {
       console.log(`[Sync] Generating recommendations for ${productsNeedingRecs.length} products...`);
-      const recs = await generateRecommendations(productsNeedingRecs, saved);
+      const { recommendations: recs, totalTokens } = await generateRecommendations(productsNeedingRecs, saved);
+
+      // 记录token消耗
+      if (totalTokens > 0) {
+        monitor.recordTokenUsage(totalTokens);
+        console.log(`[Sync] Token usage: ${totalTokens}`);
+      }
 
       for (const rec of recs) {
         const src = saved.find(p => p.productId === rec.sourceId);

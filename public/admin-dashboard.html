@@ -593,13 +593,13 @@
           <div class="subtitle">平均耗时 ${(summary.avgDuration / 1000).toFixed(2)}s</div>
         </div>
         <div class="stat-card warning">
-          <h3>Token消耗</h3>
-          <div class="value">${summary.totalTokens.toLocaleString()}</div>
-          <div class="subtitle">生成 ${summary.totalRecommendations} 个推荐</div>
+          <h3>生成推荐数</h3>
+          <div class="value">${summary.totalRecommendations.toLocaleString()}</div>
+          <div class="subtitle">AI智能推荐</div>
         </div>
         <div class="stat-card info">
-          <h3>总成本</h3>
-          <div class="value">$${summary.totalCost.toFixed(2)}</div>
+          <h3>Token消耗</h3>
+          <div class="value">${summary.totalTokens > 0 ? summary.totalTokens.toLocaleString() : '暂无数据'}</div>
           <div class="subtitle">DeepSeek API</div>
         </div>
       `;
