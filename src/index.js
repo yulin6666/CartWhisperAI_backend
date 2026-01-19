@@ -143,6 +143,8 @@ class SyncMonitor {
       productsSynced: 0,
       recommendationsGenerated: 0,
       tokensUsed: 0,
+      promptTokens: 0,
+      completionTokens: 0,
     };
   }
 
@@ -163,20 +165,54 @@ class SyncMonitor {
     Object.assign(this.metrics, updates);
   }
 
-  recordTokenUsage(tokens) {
-    this.metrics.tokensUsed += tokens || 0;
+  recordTokenUsage(usage) {
+    // 接受 usage 对象，包含 prompt_tokens 和 completion_tokens
+    if (typeof usage === 'number') {
+      // 兼容旧的调用方式（只传总数）
+      this.metrics.tokensUsed += usage || 0;
+    } else if (usage && typeof usage === 'object') {
+      // 新的调用方式（传 usage 对象）
+      this.metrics.promptTokens += usage.prompt_tokens || 0;
+      this.metrics.completionTokens += usage.completion_tokens || 0;
+      this.metrics.tokensUsed += usage.total_tokens || 0;
+    }
   }
 
-  calculateCost(tokens) {
-    // DeepSeek 定价: $0.14/1M input tokens, $0.28/1M output tokens
-    // 简化计算，假设平均 $0.21/1M tokens
-    const costPerMillion = 0.21;
-    return (tokens / 1_000_000) * costPerMillion;
+  calculateCost(usage) {
+    // DeepSeek 定价（人民币）:
+    // - Input tokens (cache miss): 2元/百万tokens
+    // - Input tokens (cache hit): 0.2元/百万tokens (暂不考虑缓存)
+    // - Output tokens: 3元/百万tokens
+
+    let promptTokens = 0;
+    let completionTokens = 0;
+
+    if (typeof usage === 'number') {
+      // 兼容旧的调用方式（只传总数），假设 60% input, 40% output
+      promptTokens = usage * 0.6;
+      completionTokens = usage * 0.4;
+    } else if (usage && typeof usage === 'object') {
+      // 新的调用方式（传 usage 对象）
+      promptTokens = usage.prompt_tokens || 0;
+      completionTokens = usage.completion_tokens || 0;
+    }
+
+    const inputCostPerMillion = 2;    // 2元/百万tokens
+    const outputCostPerMillion = 3;   // 3元/百万tokens
+
+    const inputCost = (promptTokens / 1_000_000) * inputCostPerMillion;
+    const outputCost = (completionTokens / 1_000_000) * outputCostPerMillion;
+
+    return inputCost + outputCost;
   }
 
   async success() {
     const durationMs = Date.now() - this.startTime;
-    const estimatedCost = this.calculateCost(this.metrics.tokensUsed);
+    const estimatedCost = this.calculateCost({
+      prompt_tokens: this.metrics.promptTokens,
+      completion_tokens: this.metrics.completionTokens,
+      total_tokens: this.metrics.tokensUsed
+    });
 
     try {
       await pool.query(
@@ -193,7 +229,7 @@ class SyncMonitor {
         ['success', durationMs, this.metrics.productsScanned, this.metrics.productsSynced,
          this.metrics.recommendationsGenerated, this.metrics.tokensUsed, estimatedCost, this.logId]
       );
-      console.log(`[Monitor] Sync completed: ${this.logId} (${durationMs}ms, ${this.metrics.tokensUsed} tokens, $${estimatedCost.toFixed(4)})`);
+      console.log(`[Monitor] Sync completed: ${this.logId} (${durationMs}ms, ${this.metrics.tokensUsed} tokens, ¥${estimatedCost.toFixed(4)})`);
     } catch (error) {
       console.error('[Monitor] Failed to update success:', error);
     }
@@ -368,6 +404,8 @@ async function generateRecommendations(products, allProducts = null) {
   const targetPool = allProducts || products;
   const results = [];
   let totalTokens = 0; // 累加token消耗
+  let totalPromptTokens = 0; // 累加输入token
+  let totalCompletionTokens = 0; // 累加输出token
 
   // 简化商品描述，提取关键信息
   const getGender = (p) => {
@@ -461,9 +499,17 @@ Return JSON with 3 recommendations in ENGLISH ONLY:
 
     const aiRes = await callDeepSeek(prompt);
     if (aiRes) {
-      // 累加token消耗
-      if (aiRes.usage && aiRes.usage.total_tokens) {
-        totalTokens += aiRes.usage.total_tokens;
+      // 累加token消耗（分别记录输入和输出token）
+      if (aiRes.usage) {
+        if (aiRes.usage.total_tokens) {
+          totalTokens += aiRes.usage.total_tokens;
+        }
+        if (aiRes.usage.prompt_tokens) {
+          totalPromptTokens += aiRes.usage.prompt_tokens;
+        }
+        if (aiRes.usage.completion_tokens) {
+          totalCompletionTokens += aiRes.usage.completion_tokens;
+        }
       }
 
       try {
@@ -506,7 +552,12 @@ Return JSON with 3 recommendations in ENGLISH ONLY:
     }
     if (process.env.DEEPSEEK_API_KEY) await new Promise(r => setTimeout(r, 200));
   }
-  return { recommendations: results, totalTokens };
+  return {
+    recommendations: results,
+    totalTokens,
+    promptTokens: totalPromptTokens,
+    completionTokens: totalCompletionTokens
+  };
 }
 
 // ============ Routes ============
@@ -678,12 +729,16 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
     let count = 0;
     if (productsNeedingRecs.length > 0) {
       console.log(`[Sync] Generating recommendations for ${productsNeedingRecs.length} products...`);
-      const { recommendations: recs, totalTokens } = await generateRecommendations(productsNeedingRecs, saved);
+      const { recommendations: recs, totalTokens, promptTokens, completionTokens } = await generateRecommendations(productsNeedingRecs, saved);
 
-      // 记录token消耗
+      // 记录token消耗（传入完整的 usage 对象）
       if (totalTokens > 0) {
-        monitor.recordTokenUsage(totalTokens);
-        console.log(`[Sync] Token usage: ${totalTokens}`);
+        monitor.recordTokenUsage({
+          total_tokens: totalTokens,
+          prompt_tokens: promptTokens,
+          completion_tokens: completionTokens
+        });
+        console.log(`[Sync] Token usage: ${totalTokens} (input: ${promptTokens}, output: ${completionTokens})`);
       }
 
       for (const rec of recs) {
