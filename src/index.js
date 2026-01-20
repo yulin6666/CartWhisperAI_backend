@@ -606,8 +606,38 @@ Return JSON with 3 recommendations in ENGLISH ONLY:
  */
 function isDevelopmentStore(planName) {
   if (!planName) return false;
-  const devPlans = ['affiliate', 'partner_test', 'staff', 'trial', 'frozen', 'cancelled', 'dormant'];
-  return devPlans.some(devPlan => planName.toLowerCase().includes(devPlan));
+
+  const planLower = planName.toLowerCase();
+
+  // 开发店的plan关键词
+  const devKeywords = [
+    'development',  // Basic App Development, Development Store
+    'partner',      // Partner Test, Partner Development
+    'affiliate',    // Affiliate
+    'staff',        // Staff
+    'trial',        // Trial
+    'frozen',       // Frozen
+    'cancelled',    // Cancelled
+    'dormant',      // Dormant
+    'test'          // Test Store
+  ];
+
+  // 正式付费plan（排除这些）
+  const paidPlans = [
+    'basic',        // Basic (正式付费)
+    'shopify',      // Shopify (正式付费)
+    'advanced',     // Advanced (正式付费)
+    'plus',         // Shopify Plus
+    'unlimited',    // Unlimited (旧版)
+    'professional'  // Professional (旧版)
+  ];
+
+  // 如果包含付费plan关键词但不包含development，则是正式店
+  const isPaidPlan = paidPlans.some(paid => planLower.includes(paid)) && !planLower.includes('development');
+  if (isPaidPlan) return false;
+
+  // 检查是否包含开发店关键词
+  return devKeywords.some(keyword => planLower.includes(keyword));
 }
 
 /**
