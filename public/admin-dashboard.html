@@ -647,6 +647,11 @@
         <div class="value">-</div>
         <div class="subtitle">加载中...</div>
       </div>
+      <div class="stat-card warning">
+        <h3>Token配额使用</h3>
+        <div class="value">-</div>
+        <div class="subtitle">加载中...</div>
+      </div>
     </div>
 
     <!-- Tabs -->
@@ -657,6 +662,7 @@
         <button class="tab-btn" onclick="switchTab('daily')">📊 每日统计</button>
         <button class="tab-btn" onclick="switchTab('shops')">🏪 商店列表</button>
         <button class="tab-btn" onclick="switchTab('whitelist')">🔐 开发店白名单</button>
+        <button class="tab-btn" onclick="switchTab('tokenQuota')">🎫 Token配额管理</button>
         <button class="tab-btn" onclick="switchTab('recommendations')">🎯 推荐管理</button>
       </div>
 
@@ -718,6 +724,16 @@
           <div class="loading">
             <div class="spinner"></div>
             <p>加载白名单管理...</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Token Quota Tab -->
+      <div id="tokenQuotaTab" class="tab-content">
+        <div id="tokenQuotaContent">
+          <div class="loading">
+            <div class="spinner"></div>
+            <p>加载Token配额管理...</p>
           </div>
         </div>
       </div>
@@ -820,6 +836,12 @@
         ? ((summary.successfulSyncs / summary.totalSyncs) * 100).toFixed(1)
         : 0;
 
+      // Calculate token quota usage (will be updated with real data later)
+      const tokenQuotaUsage = statsData?.tokenQuotaUsage || { used: 0, total: 0 };
+      const tokenQuotaPercentage = tokenQuotaUsage.total > 0
+        ? ((tokenQuotaUsage.used / tokenQuotaUsage.total) * 100).toFixed(1)
+        : 0;
+
       document.getElementById('statsGrid').innerHTML = `
         <div class="stat-card">
           <h3>总同步次数</h3>
@@ -840,6 +862,11 @@
           <h3>Token消耗</h3>
           <div class="value">${summary.totalTokens > 0 ? summary.totalTokens.toLocaleString() : '暂无数据'}</div>
           <div class="subtitle">DeepSeek API</div>
+        </div>
+        <div class="stat-card warning">
+          <h3>Token配额使用</h3>
+          <div class="value">${tokenQuotaPercentage}%</div>
+          <div class="subtitle">${tokenQuotaUsage.used.toLocaleString()} / ${tokenQuotaUsage.total.toLocaleString()} tokens</div>
         </div>
       `;
     }
@@ -1398,8 +1425,251 @@
         loadShopsList();
       } else if (tab === 'whitelist') {
         renderWhitelistUI();
+      } else if (tab === 'tokenQuota') {
+        renderTokenQuotaUI();
       } else if (tab === 'recommendations') {
         renderRecommendationsUI();
+      }
+    }
+
+    // 渲染Token配额管理UI
+    async function renderTokenQuotaUI() {
+      document.getElementById('tokenQuotaContent').innerHTML = `
+        <div class="loading">
+          <div class="spinner"></div>
+          <p>加载Token配额数据...</p>
+        </div>
+      `;
+
+      try {
+        const response = await fetch(`${API_BASE}/api/admin/shops`);
+        const data = await response.json();
+
+        if (!data.success) {
+          throw new Error(data.error || 'Failed to load shops');
+        }
+
+        const shops = data.shops;
+
+        // 统计数据
+        const totalShops = shops.length;
+        const freeShops = shops.filter(s => (s.plan || 'free') === 'free').length;
+        const totalQuota = shops.reduce((sum, s) => sum + (s.dailyTokenQuota || 10000), 0);
+        const totalUsed = shops.reduce((sum, s) => sum + (s.tokensUsedToday || 0), 0);
+        const totalRemaining = totalQuota - totalUsed;
+
+        const html = `
+          <div style="margin-bottom: 20px;">
+            <h2 style="color: #333; margin-bottom: 15px;">🎫 Token配额管理</h2>
+            <p style="color: #666; margin-bottom: 20px;">
+              管理每个商店的每日Token配额，防止服务器资源被滥用。免费用户默认每天10,000,000 tokens (1000万)。
+            </p>
+
+            <div class="stats-grid" style="margin-bottom: 20px;">
+              <div class="stat-card">
+                <h3>总商店数</h3>
+                <div class="value">${totalShops}</div>
+                <div class="subtitle">所有注册商店</div>
+              </div>
+              <div class="stat-card info">
+                <h3>免费商店</h3>
+                <div class="value">${freeShops}</div>
+                <div class="subtitle">受配额限制</div>
+              </div>
+              <div class="stat-card warning">
+                <h3>总配额</h3>
+                <div class="value">${totalQuota.toLocaleString()}</div>
+                <div class="subtitle">tokens/天</div>
+              </div>
+              <div class="stat-card ${totalUsed > totalQuota * 0.8 ? 'danger' : 'success'}">
+                <h3>已使用</h3>
+                <div class="value">${totalUsed.toLocaleString()}</div>
+                <div class="subtitle">${totalRemaining.toLocaleString()} tokens 剩余</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="table-container">
+            <table>
+              <thead>
+                <tr>
+                  <th>商店域名</th>
+                  <th>计划</th>
+                  <th>每日配额</th>
+                  <th>今日已用</th>
+                  <th>剩余</th>
+                  <th>使用率</th>
+                  <th>配额重置</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${shops.length === 0 ? `
+                  <tr>
+                    <td colspan="8" style="text-align: center; padding: 40px; color: #999;">
+                      暂无商店数据
+                    </td>
+                  </tr>
+                ` : shops.map(shop => {
+                  const quota = shop.dailyTokenQuota || 10000000;
+                  const used = shop.tokensUsedToday || 0;
+                  const remaining = Math.max(0, quota - used);
+                  const percentage = quota > 0 ? Math.min(100, (used / quota * 100).toFixed(1)) : 0;
+                  const resetDate = shop.quotaResetDate ? new Date(shop.quotaResetDate).toLocaleDateString('zh-CN') : '未设置';
+                  const plan = (shop.plan || 'free').toUpperCase();
+
+                  return `
+                    <tr>
+                      <td>
+                        <strong>${shop.domain}</strong><br>
+                        <small style="color: #999; font-family: monospace;">${shop.id}</small>
+                      </td>
+                      <td>
+                        <span class="badge badge-${plan === 'FREE' ? 'info' : 'success'}">${plan}</span>
+                      </td>
+                      <td>
+                        <input
+                          type="number"
+                          value="${quota}"
+                          min="0"
+                          step="1000"
+                          id="quota-${shop.id}"
+                          style="width: 100px; padding: 5px; border: 1px solid #ddd; border-radius: 4px;"
+                        />
+                      </td>
+                      <td style="font-weight: bold; color: ${used > quota * 0.8 ? '#dc3545' : '#333'};">
+                        ${used.toLocaleString()}
+                      </td>
+                      <td style="color: ${remaining === 0 ? '#dc3545' : '#28a745'};">
+                        ${remaining.toLocaleString()}
+                      </td>
+                      <td>
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                          <div style="flex: 1; height: 8px; background: #e9ecef; border-radius: 4px; overflow: hidden;">
+                            <div style="height: 100%; width: ${percentage}%; background: ${percentage > 80 ? '#dc3545' : percentage > 50 ? '#ffc107' : '#28a745'}; transition: width 0.3s;"></div>
+                          </div>
+                          <span style="font-size: 12px; font-weight: bold; min-width: 45px;">${percentage}%</span>
+                        </div>
+                      </td>
+                      <td style="font-size: 12px; color: #666;">${resetDate}</td>
+                      <td>
+                        <div style="display: flex; gap: 5px;">
+                          <button
+                            onclick="updateTokenQuota('${shop.id}', '${shop.domain}')"
+                            style="padding: 4px 8px; font-size: 11px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer;"
+                            title="更新配额"
+                          >
+                            💾 保存
+                          </button>
+                          <button
+                            onclick="resetTokenUsage('${shop.id}', '${shop.domain}')"
+                            style="padding: 4px 8px; font-size: 11px; background: #28a745; color: white; border: none; border-radius: 4px; cursor: pointer;"
+                            title="重置今日使用量"
+                          >
+                            🔄 重置
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  `;
+                }).join('')}
+              </tbody>
+            </table>
+          </div>
+
+          <div style="margin-top: 20px; padding: 15px; background: #e8f5e9; border-radius: 8px; border: 1px solid #a5d6a7;">
+            <h4 style="margin: 0 0 10px 0; color: #2e7d32;">💡 使用说明</h4>
+            <ul style="margin: 0; padding-left: 20px; color: #2e7d32; line-height: 1.8;">
+              <li>每日配额：每个商店每天可以使用的最大Token数量</li>
+              <li>配额会在每天首次同步时自动重置</li>
+              <li>免费用户默认10,000,000 tokens/天 (1000万)，付费用户不受限制</li>
+              <li>可以手动调整配额或重置今日使用量</li>
+              <li>超过配额后，商店将无法进行同步操作，直到配额重置</li>
+            </ul>
+          </div>
+        `;
+
+        document.getElementById('tokenQuotaContent').innerHTML = html;
+      } catch (error) {
+        console.error('Failed to load token quota data:', error);
+        document.getElementById('tokenQuotaContent').innerHTML = `
+          <div class="error">
+            加载Token配额数据失败: ${error.message}
+          </div>
+        `;
+      }
+    }
+
+    // 更新Token配额
+    async function updateTokenQuota(shopId, domain) {
+      const input = document.getElementById(`quota-${shopId}`);
+      const newQuota = parseInt(input.value);
+
+      if (isNaN(newQuota) || newQuota < 0) {
+        alert('请输入有效的配额数量（≥0）');
+        return;
+      }
+
+      if (!confirm(`确定要更新配额吗？\\n\\n商店: ${domain}\\n新配额: ${newQuota.toLocaleString()} tokens/天`)) {
+        return;
+      }
+
+      try {
+        const response = await fetch(`${API_BASE}/api/admin/shops/${shopId}/token-quota`, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ dailyTokenQuota: newQuota })
+        });
+
+        if (!response.ok) {
+          const error = await response.json().catch(() => ({ error: 'Unknown error' }));
+          throw new Error(error.error || `HTTP ${response.status}`);
+        }
+
+        const result = await response.json();
+        console.log('Token quota updated:', result);
+
+        alert(`成功更新配额！\\n\\n商店: ${domain}\\n新配额: ${newQuota.toLocaleString()} tokens/天`);
+
+        // 重新加载Token配额数据
+        await renderTokenQuotaUI();
+      } catch (error) {
+        console.error('Failed to update token quota:', error);
+        alert(`更新失败: ${error.message}`);
+      }
+    }
+
+    // 重置Token使用量
+    async function resetTokenUsage(shopId, domain) {
+      if (!confirm(`确定要重置今日Token使用量吗？\\n\\n商店: ${domain}\\n\\n重置后该商店今日的Token使用量将归零。`)) {
+        return;
+      }
+
+      try {
+        const response = await fetch(`${API_BASE}/api/admin/shops/${shopId}/reset-tokens`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          }
+        });
+
+        if (!response.ok) {
+          const error = await response.json().catch(() => ({ error: 'Unknown error' }));
+          throw new Error(error.error || `HTTP ${response.status}`);
+        }
+
+        const result = await response.json();
+        console.log('Token usage reset:', result);
+
+        alert(`成功重置Token使用量！\\n\\n商店: ${domain}`);
+
+        // 重新加载Token配额数据
+        await renderTokenQuotaUI();
+      } catch (error) {
+        console.error('Failed to reset token usage:', error);
+        alert(`重置失败: ${error.message}`);
       }
     }
 

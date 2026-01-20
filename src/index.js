@@ -85,6 +85,10 @@ async function initDatabase() {
     await addColumn('Shop', 'planName', 'TEXT', null);
     await addColumn('Shop', 'isDevelopmentStore', 'BOOLEAN', 'false');
     await addColumn('Shop', 'isWhitelisted', 'BOOLEAN', 'false');
+    // Daily token quota tracking
+    await addColumn('Shop', 'dailyTokenQuota', 'INTEGER', '10000000');
+    await addColumn('Shop', 'tokensUsedToday', 'INTEGER', '0');
+    await addColumn('Shop', 'quotaResetDate', 'DATE', null);
 
     // Recommendation tracking (impressions/clicks)
     await addColumn('Recommendation', 'impressions', 'INTEGER', '0');
@@ -662,6 +666,80 @@ function checkDevelopmentStoreAccess(shop) {
   return { allowed: true };
 }
 
+/**
+ * 检查并重置每日Token配额
+ * @param {object} shop - Shop对象
+ * @returns {Promise<{allowed: boolean, tokensRemaining: number, quotaResetDate: string, reason?: string}>}
+ */
+async function checkDailyTokenQuota(shop) {
+  const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+  const quota = shop.dailyTokenQuota || 10000000; // 默认1000万 tokens/天
+  let tokensUsed = shop.tokensUsedToday || 0;
+  const lastResetDate = shop.quotaResetDate ? new Date(shop.quotaResetDate).toISOString().split('T')[0] : null;
+
+  // 检查是否需要重置（新的一天）
+  if (lastResetDate !== today) {
+    console.log(`[TokenQuota] Resetting daily quota for shop ${shop.id} (last reset: ${lastResetDate}, today: ${today})`);
+    tokensUsed = 0;
+    // 更新数据库
+    await pool.query(
+      `UPDATE "Shop" SET "tokensUsedToday" = 0, "quotaResetDate" = $1::date WHERE "id" = $2`,
+      [today, shop.id]
+    );
+  }
+
+  const tokensRemaining = Math.max(0, quota - tokensUsed);
+
+  // 检查是否超过配额
+  if (tokensUsed >= quota) {
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    tomorrow.setHours(0, 0, 0, 0);
+
+    return {
+      allowed: false,
+      tokensRemaining: 0,
+      quota,
+      tokensUsed,
+      quotaResetDate: tomorrow.toISOString(),
+      reason: `Daily token quota exceeded (${tokensUsed}/${quota}). Quota resets at midnight.`
+    };
+  }
+
+  return {
+    allowed: true,
+    tokensRemaining,
+    quota,
+    tokensUsed,
+    quotaResetDate: today
+  };
+}
+
+/**
+ * 更新Token使用量
+ * @param {string} shopId - Shop ID
+ * @param {number} tokensUsed - 本次使用的token数
+ */
+async function updateTokenUsage(shopId, tokensUsed) {
+  const today = new Date().toISOString().split('T')[0];
+
+  try {
+    await pool.query(`
+      UPDATE "Shop" SET
+        "tokensUsedToday" = CASE
+          WHEN "quotaResetDate" = $1::date THEN "tokensUsedToday" + $2
+          ELSE $2
+        END,
+        "quotaResetDate" = $1::date
+      WHERE "id" = $3
+    `, [today, tokensUsed, shopId]);
+
+    console.log(`[TokenQuota] Updated token usage for shop ${shopId}: +${tokensUsed} tokens`);
+  } catch (error) {
+    console.error('[TokenQuota] Failed to update token usage:', error);
+  }
+}
+
 // ============ Routes ============
 
 // 商店注册 - 自动获取 API Key
@@ -861,6 +939,25 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
       });
     }
 
+    // Check daily token quota (only for free plan)
+    const plan = shop.plan || 'free';
+    if (plan === 'free') {
+      const quotaCheck = await checkDailyTokenQuota(shop);
+      if (!quotaCheck.allowed) {
+        console.error(`[SYNC] ❌ Daily token quota exceeded: ${shop.domain}`);
+        await monitor.fail(new Error('Daily token quota exceeded'));
+        return res.status(429).json({
+          error: quotaCheck.reason,
+          tokenQuotaExceeded: true,
+          tokensRemaining: quotaCheck.tokensRemaining,
+          quota: quotaCheck.quota,
+          tokensUsed: quotaCheck.tokensUsed,
+          quotaResetDate: quotaCheck.quotaResetDate
+        });
+      }
+      console.log(`[SYNC] ✅ Token quota check passed: ${quotaCheck.tokensRemaining}/${quotaCheck.quota} tokens remaining`);
+    }
+
     // Check refresh rate limit for manual refresh
     if (mode === 'refresh' || regenerate) {
       const refreshCheck = canRefresh(shop);
@@ -1053,6 +1150,12 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
     });
     await monitor.success();
 
+    // 更新Token使用量（仅免费用户）
+    if (plan === 'free' && monitor.metrics.tokensUsed > 0) {
+      await updateTokenUsage(shopId, monitor.metrics.tokensUsed);
+      console.log(`[SYNC] 📊 Updated token usage: ${monitor.metrics.tokensUsed} tokens`);
+    }
+
     // Calculate next refresh time with updated shop data
     const updatedShop = {
       ...shop,
@@ -1061,6 +1164,18 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
       refreshMonth: updateFields.refreshMonth || shop.refreshMonth
     };
     const refreshCheck = canRefresh(updatedShop);
+
+    // Get updated token quota info
+    let tokenQuotaInfo = null;
+    if (plan === 'free') {
+      const quotaCheck = await checkDailyTokenQuota({ ...shop, tokensUsedToday: (shop.tokensUsedToday || 0) + monitor.metrics.tokensUsed });
+      tokenQuotaInfo = {
+        tokensRemaining: quotaCheck.tokensRemaining,
+        quota: quotaCheck.quota,
+        tokensUsed: quotaCheck.tokensUsed,
+        quotaResetDate: quotaCheck.quotaResetDate
+      };
+    }
 
     res.json({
       success: true,
@@ -1074,7 +1189,8 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
         remaining: refreshCheck.remaining,
         nextRefreshAt: refreshCheck.nextRefreshAt
       },
-      canRefresh: refreshCheck.allowed
+      canRefresh: refreshCheck.allowed,
+      tokenQuota: tokenQuotaInfo
     });
   } catch (e) {
     console.error('[Sync] Error:', e);
@@ -1210,6 +1326,18 @@ app.get('/api/shops/sync-status', auth, async (req, res) => {
       apiCallsToday = 0; // Reset for new day
     }
 
+    // Get token quota info (for free plan)
+    let tokenQuota = null;
+    if (plan === 'free') {
+      const quotaCheck = await checkDailyTokenQuota(shop);
+      tokenQuota = {
+        tokensRemaining: quotaCheck.tokensRemaining,
+        quota: quotaCheck.quota,
+        tokensUsed: quotaCheck.tokensUsed,
+        quotaResetDate: quotaCheck.quotaResetDate
+      };
+    }
+
     res.json({
       success: true,
       syncStatus: {
@@ -1233,7 +1361,9 @@ app.get('/api/shops/sync-status', auth, async (req, res) => {
           remaining: Math.max(0, apiLimit - apiCallsToday),
           percentage: Math.min(100, Math.round((apiCallsToday / apiLimit) * 100)),
           resetsAt: new Date(new Date().setHours(24, 0, 0, 0)).toISOString()
-        }
+        },
+        // Token quota (free plan only)
+        tokenQuota: tokenQuota
       }
     });
   } catch (e) {
@@ -2085,7 +2215,10 @@ app.get('/api/admin/shops', async (req, res) => {
         "productCount",
         "initialSyncDone",
         "lastRefreshAt",
-        "createdAt"
+        "createdAt",
+        "dailyTokenQuota",
+        "tokensUsedToday",
+        "quotaResetDate"
       FROM "Shop"
       ORDER BY "createdAt" DESC
     `);
@@ -2162,6 +2295,65 @@ app.put('/api/admin/shops/:shopId/plan-name', async (req, res) => {
     });
   } catch (e) {
     console.error('[Admin] Error updating plan name:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Update shop token quota
+app.put('/api/admin/shops/:shopId/token-quota', async (req, res) => {
+  try {
+    const { shopId } = req.params;
+    const { dailyTokenQuota } = req.body;
+
+    if (typeof dailyTokenQuota !== 'number' || dailyTokenQuota < 0) {
+      return res.status(400).json({ error: 'dailyTokenQuota must be a positive number' });
+    }
+
+    const result = await pool.query(
+      `UPDATE "Shop" SET "dailyTokenQuota" = $1, "updatedAt" = NOW() WHERE "id" = $2 RETURNING *`,
+      [dailyTokenQuota, shopId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Shop not found' });
+    }
+
+    const shop = result.rows[0];
+    console.log(`[Admin] Updated token quota for ${shop.domain}: ${dailyTokenQuota} tokens/day`);
+
+    res.json({
+      success: true,
+      shop: result.rows[0]
+    });
+  } catch (e) {
+    console.error('[Admin] Error updating token quota:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Reset shop token usage (for testing/admin)
+app.post('/api/admin/shops/:shopId/reset-tokens', async (req, res) => {
+  try {
+    const { shopId } = req.params;
+
+    const result = await pool.query(
+      `UPDATE "Shop" SET "tokensUsedToday" = 0, "quotaResetDate" = NULL, "updatedAt" = NOW() WHERE "id" = $1 RETURNING *`,
+      [shopId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Shop not found' });
+    }
+
+    const shop = result.rows[0];
+    console.log(`[Admin] Reset token usage for ${shop.domain}`);
+
+    res.json({
+      success: true,
+      shop: result.rows[0]
+    });
+  } catch (e) {
+    console.error('[Admin] Error resetting tokens:', e);
     res.status(500).json({ error: e.message });
   }
 });
