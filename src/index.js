@@ -81,6 +81,10 @@ async function initDatabase() {
     // Monthly refresh tracking
     await addColumn('Shop', 'refreshCount', 'INTEGER', '0');
     await addColumn('Shop', 'refreshMonth', 'TEXT', null);
+    // Development store detection
+    await addColumn('Shop', 'planName', 'TEXT', null);
+    await addColumn('Shop', 'isDevelopmentStore', 'BOOLEAN', 'false');
+    await addColumn('Shop', 'isWhitelisted', 'BOOLEAN', 'false');
 
     // Recommendation tracking (impressions/clicks)
     await addColumn('Recommendation', 'impressions', 'INTEGER', '0');
@@ -594,12 +598,46 @@ Return JSON with 3 recommendations in ENGLISH ONLY:
   };
 }
 
+// ============ Development Store Detection ============
+/**
+ * 判断是否为开发店
+ * @param {string} planName - Shopify plan name
+ * @returns {boolean}
+ */
+function isDevelopmentStore(planName) {
+  if (!planName) return false;
+  const devPlans = ['affiliate', 'partner_test', 'staff', 'trial', 'frozen', 'cancelled', 'dormant'];
+  return devPlans.some(devPlan => planName.toLowerCase().includes(devPlan));
+}
+
+/**
+ * 检查开发店是否可以使用服务
+ * @param {object} shop - Shop对象
+ * @returns {{ allowed: boolean, reason?: string }}
+ */
+function checkDevelopmentStoreAccess(shop) {
+  // 如果在白名单中，允许访问
+  if (shop.isWhitelisted) {
+    return { allowed: true };
+  }
+
+  // 如果是开发店且不在白名单中，拒绝访问
+  if (shop.isDevelopmentStore) {
+    return {
+      allowed: false,
+      reason: 'Development stores are not eligible for the free plan. Please upgrade to a paid Shopify plan or contact support for whitelist access.'
+    };
+  }
+
+  return { allowed: true };
+}
+
 // ============ Routes ============
 
 // 商店注册 - 自动获取 API Key
 app.post('/api/shops/register', async (req, res) => {
   try {
-    const { domain } = req.body;
+    const { domain, planName } = req.body;
     if (!domain) return res.status(400).json({ error: 'Domain required' });
 
     const cleanDomain = domain.replace(/^https?:\/\//, '').replace(/\/$/, '');
@@ -607,11 +645,53 @@ app.post('/api/shops/register', async (req, res) => {
     // 检查是否已存在
     const existing = await pool.query('SELECT * FROM "Shop" WHERE "domain" = $1', [cleanDomain]);
     if (existing.rows.length > 0) {
+      const shop = existing.rows[0];
+
+      // 更新 planName 和 isDevelopmentStore（如果提供了 planName）
+      if (planName) {
+        const isDevStore = isDevelopmentStore(planName);
+        await pool.query(
+          `UPDATE "Shop" SET "planName" = $1, "isDevelopmentStore" = $2, "updatedAt" = NOW() WHERE "domain" = $3`,
+          [planName, isDevStore, cleanDomain]
+        );
+        console.log(`[Register] Updated shop ${cleanDomain}: planName=${planName}, isDevelopmentStore=${isDevStore}`);
+
+        // 更新shop对象以便检查
+        shop.planName = planName;
+        shop.isDevelopmentStore = isDevStore;
+      }
+
+      // 检查开发店访问权限
+      const accessCheck = checkDevelopmentStoreAccess(shop);
+      if (!accessCheck.allowed) {
+        return res.status(403).json({
+          error: accessCheck.reason,
+          isDevelopmentStore: true,
+          isWhitelisted: false,
+          requiresWhitelist: true
+        });
+      }
+
       return res.json({
         success: true,
         apiKey: existing.rows[0].apiKey,
         isNew: false,
-        message: 'Shop already registered'
+        message: 'Shop already registered',
+        isDevelopmentStore: shop.isDevelopmentStore || false,
+        isWhitelisted: shop.isWhitelisted || false
+      });
+    }
+
+    // 检测是否为开发店
+    const isDevStore = planName ? isDevelopmentStore(planName) : false;
+
+    // 如果是开发店且不在白名单，拒绝注册
+    if (isDevStore) {
+      return res.status(403).json({
+        error: 'Development stores are not eligible for the free plan. Please upgrade to a paid Shopify plan or contact support for whitelist access.',
+        isDevelopmentStore: true,
+        isWhitelisted: false,
+        requiresWhitelist: true
       });
     }
 
@@ -620,16 +700,18 @@ app.post('/api/shops/register', async (req, res) => {
     const shopId = `shop_${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`;
 
     await pool.query(
-      'INSERT INTO "Shop" ("id", "domain", "apiKey", "createdAt") VALUES ($1, $2, $3, NOW())',
-      [shopId, cleanDomain, apiKey]
+      `INSERT INTO "Shop" ("id", "domain", "apiKey", "planName", "isDevelopmentStore", "createdAt") VALUES ($1, $2, $3, $4, $5, NOW())`,
+      [shopId, cleanDomain, apiKey, planName || null, isDevStore]
     );
 
-    console.log(`[Register] New shop: ${cleanDomain}`);
+    console.log(`[Register] New shop: ${cleanDomain}, planName=${planName}, isDevelopmentStore=${isDevStore}`);
     res.json({
       success: true,
       apiKey,
       isNew: true,
-      message: 'Shop registered successfully'
+      message: 'Shop registered successfully',
+      isDevelopmentStore: isDevStore,
+      isWhitelisted: false
     });
   } catch (e) {
     console.error('[Register] Error:', e);
@@ -735,6 +817,19 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
 
     console.log(`[SYNC] ✅ Products validation passed: ${products.length} products`);
     monitor.updateMetrics({ productsScanned: products.length });
+
+    // Check development store access
+    const accessCheck = checkDevelopmentStoreAccess(shop);
+    if (!accessCheck.allowed) {
+      console.error(`[SYNC] ❌ Development store access denied: ${shop.domain}`);
+      await monitor.fail(new Error('Development store access denied'));
+      return res.status(403).json({
+        error: accessCheck.reason,
+        isDevelopmentStore: true,
+        isWhitelisted: false,
+        requiresWhitelist: true
+      });
+    }
 
     // Check refresh rate limit for manual refresh
     if (mode === 'refresh' || regenerate) {
@@ -1940,6 +2035,103 @@ app.get('/api/monitoring/shops', async (req, res) => {
     });
   } catch (e) {
     console.error('[Monitoring] Error fetching shops:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ============ Whitelist Management API ============
+
+// Get all shops with development store status
+app.get('/api/admin/shops', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT
+        "id",
+        "domain",
+        "plan",
+        "planName",
+        "isDevelopmentStore",
+        "isWhitelisted",
+        "productCount",
+        "initialSyncDone",
+        "lastRefreshAt",
+        "createdAt"
+      FROM "Shop"
+      ORDER BY "createdAt" DESC
+    `);
+
+    res.json({
+      success: true,
+      shops: result.rows
+    });
+  } catch (e) {
+    console.error('[Admin] Error fetching shops:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Update shop whitelist status
+app.put('/api/admin/shops/:shopId/whitelist', async (req, res) => {
+  try {
+    const { shopId } = req.params;
+    const { isWhitelisted } = req.body;
+
+    if (typeof isWhitelisted !== 'boolean') {
+      return res.status(400).json({ error: 'isWhitelisted must be a boolean' });
+    }
+
+    const result = await pool.query(
+      `UPDATE "Shop" SET "isWhitelisted" = $1, "updatedAt" = NOW() WHERE "id" = $2 RETURNING *`,
+      [isWhitelisted, shopId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Shop not found' });
+    }
+
+    const shop = result.rows[0];
+    console.log(`[Admin] Updated whitelist for ${shop.domain}: ${isWhitelisted}`);
+
+    res.json({
+      success: true,
+      shop: result.rows[0]
+    });
+  } catch (e) {
+    console.error('[Admin] Error updating whitelist:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Update shop plan name (for manual correction)
+app.put('/api/admin/shops/:shopId/plan-name', async (req, res) => {
+  try {
+    const { shopId } = req.params;
+    const { planName } = req.body;
+
+    if (!planName) {
+      return res.status(400).json({ error: 'planName is required' });
+    }
+
+    const isDevStore = isDevelopmentStore(planName);
+
+    const result = await pool.query(
+      `UPDATE "Shop" SET "planName" = $1, "isDevelopmentStore" = $2, "updatedAt" = NOW() WHERE "id" = $3 RETURNING *`,
+      [planName, isDevStore, shopId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Shop not found' });
+    }
+
+    const shop = result.rows[0];
+    console.log(`[Admin] Updated planName for ${shop.domain}: ${planName}, isDevelopmentStore=${isDevStore}`);
+
+    res.json({
+      success: true,
+      shop: result.rows[0]
+    });
+  } catch (e) {
+    console.error('[Admin] Error updating plan name:', e);
     res.status(500).json({ error: e.message });
   }
 });

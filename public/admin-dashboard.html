@@ -520,6 +520,70 @@
       outline: none;
       border-color: #667eea;
     }
+
+    .whitelist-table td {
+      vertical-align: middle;
+    }
+
+    .toggle-switch {
+      position: relative;
+      display: inline-block;
+      width: 50px;
+      height: 24px;
+    }
+
+    .toggle-switch input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+
+    .toggle-slider {
+      position: absolute;
+      cursor: pointer;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background-color: #ccc;
+      transition: .4s;
+      border-radius: 24px;
+    }
+
+    .toggle-slider:before {
+      position: absolute;
+      content: "";
+      height: 18px;
+      width: 18px;
+      left: 3px;
+      bottom: 3px;
+      background-color: white;
+      transition: .4s;
+      border-radius: 50%;
+    }
+
+    .toggle-switch input:checked + .toggle-slider {
+      background-color: #10b981;
+    }
+
+    .toggle-switch input:checked + .toggle-slider:before {
+      transform: translateX(26px);
+    }
+
+    .badge-dev {
+      background: #fee2e2;
+      color: #991b1b;
+    }
+
+    .badge-regular {
+      background: #dbeafe;
+      color: #1e40af;
+    }
+
+    .badge-whitelisted {
+      background: #d1fae5;
+      color: #065f46;
+    }
   </style>
 </head>
 <body>
@@ -592,6 +656,7 @@
         <button class="tab-btn" onclick="switchTab('logs')">📋 同步日志</button>
         <button class="tab-btn" onclick="switchTab('daily')">📊 每日统计</button>
         <button class="tab-btn" onclick="switchTab('shops')">🏪 商店列表</button>
+        <button class="tab-btn" onclick="switchTab('whitelist')">🔐 开发店白名单</button>
         <button class="tab-btn" onclick="switchTab('recommendations')">🎯 推荐管理</button>
       </div>
 
@@ -643,6 +708,16 @@
           <div class="loading">
             <div class="spinner"></div>
             <p>加载商店列表...</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Whitelist Tab -->
+      <div id="whitelistTab" class="tab-content">
+        <div id="whitelistContent">
+          <div class="loading">
+            <div class="spinner"></div>
+            <p>加载白名单管理...</p>
           </div>
         </div>
       </div>
@@ -954,6 +1029,176 @@
       document.getElementById('shopsContent').innerHTML = html;
     }
 
+    // 渲染白名单管理UI
+    async function renderWhitelistUI() {
+      document.getElementById('whitelistContent').innerHTML = `
+        <div class="loading">
+          <div class="spinner"></div>
+          <p>加载白名单数据...</p>
+        </div>
+      `;
+
+      try {
+        const response = await fetch(`${API_BASE}/api/admin/shops`);
+        const data = await response.json();
+
+        if (!data.success) {
+          throw new Error(data.error || 'Failed to load shops');
+        }
+
+        const shops = data.shops;
+
+        // 统计数据
+        const totalShops = shops.length;
+        const devStores = shops.filter(s => s.isDevelopmentStore).length;
+        const whitelisted = shops.filter(s => s.isWhitelisted).length;
+        const regularStores = totalShops - devStores;
+
+        const html = `
+          <div style="margin-bottom: 20px;">
+            <h2 style="color: #333; margin-bottom: 15px;">🔐 开发店白名单管理</h2>
+            <p style="color: #666; margin-bottom: 20px;">
+              管理开发商店的访问权限。开发店默认不能使用免费套餐，需要手动加入白名单才能使用。
+            </p>
+
+            <div class="stats-grid" style="margin-bottom: 20px;">
+              <div class="stat-card">
+                <h3>总商店数</h3>
+                <div class="value">${totalShops}</div>
+                <div class="subtitle">所有注册商店</div>
+              </div>
+              <div class="stat-card info">
+                <h3>正式商店</h3>
+                <div class="value">${regularStores}</div>
+                <div class="subtitle">付费Shopify计划</div>
+              </div>
+              <div class="stat-card danger">
+                <h3>开发商店</h3>
+                <div class="value">${devStores}</div>
+                <div class="subtitle">需要白名单才能使用</div>
+              </div>
+              <div class="stat-card success">
+                <h3>已加白名单</h3>
+                <div class="value">${whitelisted}</div>
+                <div class="subtitle">允许访问的开发店</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="table-container whitelist-table">
+            <table>
+              <thead>
+                <tr>
+                  <th>商店域名</th>
+                  <th>Shopify Plan</th>
+                  <th>商店类型</th>
+                  <th>白名单状态</th>
+                  <th>商品数</th>
+                  <th>创建时间</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${shops.length === 0 ? `
+                  <tr>
+                    <td colspan="7" style="text-align: center; padding: 40px; color: #999;">
+                      暂无商店数据
+                    </td>
+                  </tr>
+                ` : shops.map(shop => `
+                  <tr>
+                    <td>
+                      <strong>${shop.domain}</strong><br>
+                      <small style="color: #999; font-family: monospace;">${shop.id}</small>
+                    </td>
+                    <td>
+                      <span class="badge badge-info">${shop.planName || 'Unknown'}</span>
+                    </td>
+                    <td>
+                      ${shop.isDevelopmentStore
+                        ? '<span class="badge badge-dev">🧪 开发商店</span>'
+                        : '<span class="badge badge-regular">✅ 正式商店</span>'
+                      }
+                    </td>
+                    <td>
+                      ${shop.isWhitelisted
+                        ? '<span class="badge badge-whitelisted">✅ 已加白名单</span>'
+                        : '<span class="badge" style="background: #f0f0f0; color: #666;">❌ 未加白名单</span>'
+                      }
+                    </td>
+                    <td>${shop.productCount || 0}</td>
+                    <td>${formatDate(shop.createdAt)}</td>
+                    <td>
+                      <label class="toggle-switch">
+                        <input
+                          type="checkbox"
+                          ${shop.isWhitelisted ? 'checked' : ''}
+                          onchange="toggleWhitelist('${shop.id}', '${shop.domain}', this.checked)"
+                        >
+                        <span class="toggle-slider"></span>
+                      </label>
+                    </td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+        `;
+
+        document.getElementById('whitelistContent').innerHTML = html;
+      } catch (error) {
+        console.error('Failed to load whitelist data:', error);
+        document.getElementById('whitelistContent').innerHTML = `
+          <div class="error">
+            加载白名单数据失败: ${error.message}
+          </div>
+        `;
+      }
+    }
+
+    // 切换白名单状态
+    async function toggleWhitelist(shopId, domain, isWhitelisted) {
+      const action = isWhitelisted ? '添加到' : '从';
+      const confirmMsg = `确定要${action}白名单吗？\n\n商店: ${domain}\n${isWhitelisted ? '添加后该开发店可以使用服务' : '移除后该开发店将无法使用服务'}`;
+
+      if (!confirm(confirmMsg)) {
+        // 用户取消，恢复开关状态
+        await renderWhitelistUI();
+        return;
+      }
+
+      try {
+        const response = await fetch(`${API_BASE}/api/admin/shops/${shopId}/whitelist`, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ isWhitelisted })
+        });
+
+        if (!response.ok) {
+          const error = await response.json().catch(() => ({ error: 'Unknown error' }));
+          throw new Error(error.error || `HTTP ${response.status}`);
+        }
+
+        const result = await response.json();
+        console.log('Whitelist updated:', result);
+
+        // 显示成功消息
+        alert(`成功${isWhitelisted ? '添加' : '移除'}白名单！\n\n商店: ${domain}`);
+
+        // 重新加载白名单数据
+        await renderWhitelistUI();
+        // 同时刷新商店列表
+        await loadShops();
+      } catch (error) {
+        console.error('Failed to toggle whitelist:', error);
+        alert(`操作失败: ${error.message}`);
+        // 恢复开关状态
+        await renderWhitelistUI();
+      }
+    }
+
     // 渲染图表
     function renderCharts() {
       if (!statsData || !statsData.daily || statsData.daily.length === 0) {
@@ -1151,6 +1396,8 @@
         renderDaily();
       } else if (tab === 'shops') {
         loadShopsList();
+      } else if (tab === 'whitelist') {
+        renderWhitelistUI();
       } else if (tab === 'recommendations') {
         renderRecommendationsUI();
       }
