@@ -410,6 +410,11 @@ async function generateRecommendations(products, allProducts = null) {
   let totalPromptTokens = 0; // 累加输入token
   let totalCompletionTokens = 0; // 累加输出token
 
+  console.log('[AI] ===== GENERATE RECOMMENDATIONS =====');
+  console.log(`[AI] Products to generate recs for: ${products.length}`);
+  console.log(`[AI] Target pool size: ${targetPool.length}`);
+  console.log(`[AI] DeepSeek API Key present: ${!!process.env.DEEPSEEK_API_KEY}`);
+
   // 简化商品描述，提取关键信息
   const getGender = (p) => {
     const title = (p.title || '').toLowerCase();
@@ -464,6 +469,8 @@ async function generateRecommendations(products, allProducts = null) {
     const productGender = getGender(product);
     const productCategory = getCategory(product);
 
+    console.log(`[AI] Processing product: ${product.productId} - "${product.title}" (gender=${productGender}, category=${productCategory})`);
+
     // 过滤：排除同款、同ID、性别不匹配、同类型的商品
     const others = targetPool.filter(p => {
       if (p.productId === product.productId) return false;
@@ -480,7 +487,13 @@ async function generateRecommendations(products, allProducts = null) {
 
       return true;
     });
-    if (others.length === 0) continue;
+
+    console.log(`[AI] After filtering: ${others.length} candidate products for recommendations`);
+
+    if (others.length === 0) {
+      console.log(`[AI] ⚠️ No suitable candidates found, skipping this product`);
+      continue;
+    }
 
     const prompt = `You are an e-commerce cross-sell recommendation expert. Please recommend 3 best matching products for the following item.
 
@@ -500,8 +513,11 @@ ${others.map((p, i) => `${i + 1}. ID:${p.productId} | ${summarize(p)} | $${p.pri
 Return JSON with 3 recommendations in ENGLISH ONLY:
 {"recommendations":[{"productId":"xxx","reason":"English reason only"}]}`;
 
+    console.log(`[AI] Calling DeepSeek API for product ${product.productId}...`);
     const aiRes = await callDeepSeek(prompt);
+
     if (aiRes) {
+      console.log(`[AI] ✅ DeepSeek API response received`);
       // 累加token消耗（分别记录输入和输出token）
       if (aiRes.usage) {
         if (aiRes.usage.total_tokens) {
@@ -513,6 +529,7 @@ Return JSON with 3 recommendations in ENGLISH ONLY:
         if (aiRes.usage.completion_tokens) {
           totalCompletionTokens += aiRes.usage.completion_tokens;
         }
+        console.log(`[AI] Tokens used: ${aiRes.usage.total_tokens} (input: ${aiRes.usage.prompt_tokens}, output: ${aiRes.usage.completion_tokens})`);
       }
 
       try {
@@ -520,6 +537,7 @@ Return JSON with 3 recommendations in ENGLISH ONLY:
         if (json) {
           const parsed = JSON.parse(json);
           const seen = new Set(); // 避免重复推荐
+          let addedForThisProduct = 0;
           for (const rec of (parsed.recommendations || []).slice(0, 3)) {
             const productId = String(rec.productId);
             if (seen.has(productId)) continue;
@@ -532,29 +550,42 @@ Return JSON with 3 recommendations in ENGLISH ONLY:
                 targetId: target.productId,
                 reason: rec.reason || 'Recommended pairing'
               });
+              addedForThisProduct++;
             }
           }
+          console.log(`[AI] ✅ Added ${addedForThisProduct} recommendations for product ${product.productId}`);
+        } else {
+          console.warn(`[AI] ⚠️ Could not extract JSON from AI response`);
         }
       } catch (e) {
-        console.error('[AI] Parse error:', e.message);
+        console.error('[AI] ❌ Parse error:', e.message);
       }
     } else {
+      console.log(`[AI] ⚠️ No AI response, using fallback recommendations`);
       // Fallback: 优先推荐配饰类商品
       const accessories = others.filter(p =>
         (p.productType || '').toLowerCase().includes('accessor') ||
         (p.productType || '').toLowerCase().includes('footwear')
       );
       const fallbackPool = accessories.length > 0 ? accessories : others;
+      let fallbackCount = 0;
       fallbackPool.slice(0, 3).forEach(t => {
         results.push({
           sourceId: product.productId,
           targetId: t.productId,
           reason: 'Perfect match'
         });
+        fallbackCount++;
       });
+      console.log(`[AI] Added ${fallbackCount} fallback recommendations for product ${product.productId}`);
     }
     if (process.env.DEEPSEEK_API_KEY) await new Promise(r => setTimeout(r, 200));
   }
+
+  console.log('[AI] ===== GENERATION COMPLETE =====');
+  console.log(`[AI] Total recommendations generated: ${results.length}`);
+  console.log(`[AI] Total tokens used: ${totalTokens}`);
+
   return {
     recommendations: results,
     totalTokens,
@@ -672,6 +703,14 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
   const shop = req.shop;
   const isFirstSync = !shop.initialSyncDone;
 
+  console.log('='.repeat(80));
+  console.log('[SYNC] ===== NEW SYNC REQUEST =====');
+  console.log(`[SYNC] Shop: ${shop.domain} (ID: ${shopId})`);
+  console.log(`[SYNC] Request params: mode="${mode}", regenerate=${regenerate}`);
+  console.log(`[SYNC] Products received: ${products?.length || 0}`);
+  console.log(`[SYNC] Shop state: initialSyncDone=${shop.initialSyncDone}, lastRefreshAt=${shop.lastRefreshAt}`);
+  console.log('='.repeat(80));
+
   // 确定实际模式用于监控
   let monitorMode = mode;
   if (isFirstSync) {
@@ -682,15 +721,19 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
     monitorMode = 'incremental';
   }
 
+  console.log(`[SYNC] Monitor mode determined: ${monitorMode}`);
+
   const monitor = new SyncMonitor(shopId, monitorMode);
   await monitor.start();
 
   try {
     if (!Array.isArray(products) || !products.length) {
+      console.error('[SYNC] ❌ ERROR: No products array received');
       await monitor.fail(new Error('Products required'));
       return res.status(400).json({ error: 'Products required' });
     }
 
+    console.log(`[SYNC] ✅ Products validation passed: ${products.length} products`);
     monitor.updateMetrics({ productsScanned: products.length });
 
     // Check refresh rate limit for manual refresh
@@ -739,28 +782,48 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
 
     // Determine which products need recommendations based on mode
     let productsNeedingRecs = saved;
+
+    console.log('[SYNC] ===== DETERMINING RECOMMENDATION STRATEGY =====');
+    console.log(`[SYNC] Actual mode: ${actualMode}`);
+    console.log(`[SYNC] Total products saved: ${saved.length}`);
+
     if (actualMode === 'refresh') {
       // Refresh mode: delete all and regenerate
-      await client.query('DELETE FROM "Recommendation" WHERE "shopId" = $1', [shopId]);
-      console.log(`[Sync] Refresh mode: Regenerating all recommendations...`);
+      console.log('[SYNC] 🔄 REFRESH MODE: Deleting all existing recommendations...');
+      const deleteResult = await client.query('DELETE FROM "Recommendation" WHERE "shopId" = $1', [shopId]);
+      console.log(`[SYNC] ✅ Deleted ${deleteResult.rowCount} existing recommendations`);
+      console.log(`[SYNC] Will regenerate recommendations for ALL ${saved.length} products`);
     } else if (actualMode === 'incremental') {
       // Incremental mode: only new products
+      console.log('[SYNC] 📈 INCREMENTAL MODE: Finding products without recommendations...');
       const existingRecs = await client.query(
         'SELECT DISTINCT "sourceId" FROM "Recommendation" WHERE "shopId" = $1',
         [shopId]
       );
+      console.log(`[SYNC] Found ${existingRecs.rows.length} products with existing recommendations`);
       const existingSourceIds = new Set(existingRecs.rows.map(r => r.sourceId));
       productsNeedingRecs = saved.filter(p => !existingSourceIds.has(p.id));
-      console.log(`[Sync] Incremental mode: ${productsNeedingRecs.length} new products need recommendations`);
+      console.log(`[SYNC] ✅ Filtered down to ${productsNeedingRecs.length} NEW products needing recommendations`);
+      if (productsNeedingRecs.length > 0) {
+        console.log(`[SYNC] Sample products needing recs:`, productsNeedingRecs.slice(0, 3).map(p => ({ id: p.productId, title: p.title })));
+      }
     } else {
       // Initial mode: generate for all
-      console.log(`[Sync] Initial mode: Generating recommendations for all ${saved.length} products...`);
+      console.log(`[SYNC] 🆕 INITIAL MODE: Generating recommendations for ALL ${saved.length} products`);
     }
+
+    console.log('[SYNC] ===== RECOMMENDATION GENERATION PHASE =====');
+    console.log(`[SYNC] Products needing recommendations: ${productsNeedingRecs.length}`);
 
     let count = 0;
     if (productsNeedingRecs.length > 0) {
-      console.log(`[Sync] Generating recommendations for ${productsNeedingRecs.length} products...`);
+      console.log(`[SYNC] 🤖 Calling AI to generate recommendations for ${productsNeedingRecs.length} products...`);
+      console.log(`[SYNC] Total product pool for recommendations: ${saved.length}`);
+
       const { recommendations: recs, totalTokens, promptTokens, completionTokens } = await generateRecommendations(productsNeedingRecs, saved);
+
+      console.log(`[SYNC] ✅ AI returned ${recs.length} recommendations`);
+      console.log(`[SYNC] Token usage: total=${totalTokens}, input=${promptTokens}, output=${completionTokens}`);
 
       // 记录token消耗（传入完整的 usage 对象）
       if (totalTokens > 0) {
@@ -769,9 +832,9 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
           prompt_tokens: promptTokens,
           completion_tokens: completionTokens
         });
-        console.log(`[Sync] Token usage: ${totalTokens} (input: ${promptTokens}, output: ${completionTokens})`);
       }
 
+      console.log(`[SYNC] 💾 Saving ${recs.length} recommendations to database...`);
       for (const rec of recs) {
         const src = saved.find(p => p.productId === rec.sourceId);
         const tgt = saved.find(p => p.productId === rec.targetId);
@@ -783,12 +846,22 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
             ON CONFLICT ("shopId", "sourceId", "targetId") DO UPDATE SET "reason" = $5
           `, [crypto.randomUUID(), shopId, src.id, tgt.id, rec.reason]);
           count++;
+        } else {
+          console.warn(`[SYNC] ⚠️ Could not find src or tgt for recommendation:`, { sourceId: rec.sourceId, targetId: rec.targetId, srcFound: !!src, tgtFound: !!tgt });
         }
       }
+      console.log(`[SYNC] ✅ Successfully saved ${count} recommendations to database`);
+    } else {
+      console.log('[SYNC] ⏭️ No products need recommendations, skipping generation phase');
     }
 
     // 获取总推荐数
     const totalRecs = await client.query('SELECT COUNT(*) FROM "Recommendation" WHERE "shopId" = $1', [shopId]);
+    const totalRecsCount = parseInt(totalRecs.rows[0].count);
+
+    console.log('[SYNC] ===== DATABASE STATE AFTER SYNC =====');
+    console.log(`[SYNC] Total recommendations in DB: ${totalRecsCount}`);
+    console.log(`[SYNC] New recommendations created this sync: ${count}`);
 
     // Update shop sync tracking
     const updateFields = {
@@ -801,6 +874,7 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
     if (actualMode === 'initial') {
       updateFields.initialSyncDone = true;
       updateFields.lastRefreshAt = new Date();
+      console.log('[SYNC] Setting initialSyncDone = true');
     } else if (actualMode === 'refresh') {
       updateFields.lastRefreshAt = new Date();
 
@@ -815,6 +889,7 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
         updateFields.refreshCount = (shop.refreshCount || 0) + 1;
         updateFields.refreshMonth = currentMonth;
       }
+      console.log(`[SYNC] Updating refresh count: ${updateFields.refreshCount}`);
     }
 
     await client.query(`
@@ -836,7 +911,14 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
       shopId
     ]);
 
-    console.log(`[Sync] Done: ${saved.length} products, ${count} new recommendations, ${totalRecs.rows[0].count} total, mode=${actualMode}`);
+    console.log(`[SYNC] ===== SYNC COMPLETE =====`);
+    console.log(`[SYNC] Summary:`);
+    console.log(`[SYNC]   - Mode: ${actualMode}`);
+    console.log(`[SYNC]   - Products synced: ${saved.length}`);
+    console.log(`[SYNC]   - New recommendations: ${count}`);
+    console.log(`[SYNC]   - Total recommendations: ${totalRecsCount}`);
+    console.log('='.repeat(80));
+
     cache.clear();
 
     // 更新监控指标
