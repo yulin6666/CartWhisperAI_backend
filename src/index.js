@@ -136,7 +136,26 @@ async function initDatabase() {
     await client.query(`CREATE INDEX IF NOT EXISTS "ApiLog_shopId_idx" ON "ApiLog"("shopId", "startedAt")`);
     await client.query(`CREATE INDEX IF NOT EXISTS "ApiLog_endpoint_idx" ON "ApiLog"("endpoint")`);
 
-    console.log('[DB] Ready (with monitoring tables)');
+    // ============ 全局配额表 ============
+    // GlobalQuota - 存储全局免费配额信息
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS "GlobalQuota" (
+        "id" TEXT PRIMARY KEY DEFAULT 'global',
+        "dailyTokenQuota" INTEGER DEFAULT 10000000,
+        "tokensUsedToday" INTEGER DEFAULT 0,
+        "quotaResetDate" DATE,
+        "updatedAt" TIMESTAMP DEFAULT NOW()
+      )
+    `);
+
+    // 初始化全局配额记录（如果不存在）
+    await client.query(`
+      INSERT INTO "GlobalQuota" ("id", "dailyTokenQuota", "tokensUsedToday", "quotaResetDate", "updatedAt")
+      VALUES ('global', 10000000, 0, CURRENT_DATE, NOW())
+      ON CONFLICT ("id") DO NOTHING
+    `);
+
+    console.log('[DB] Ready (with monitoring tables and global quota)');
   } finally {
     client.release();
   }
@@ -667,24 +686,44 @@ function checkDevelopmentStoreAccess(shop) {
 }
 
 /**
- * 检查并重置每日Token配额
- * @param {object} shop - Shop对象
+ * 检查并重置全局每日Token配额
  * @returns {Promise<{allowed: boolean, tokensRemaining: number, quotaResetDate: string, reason?: string}>}
  */
-async function checkDailyTokenQuota(shop) {
+async function checkDailyTokenQuota() {
   const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
-  const quota = shop.dailyTokenQuota || 10000000; // 默认1000万 tokens/天
-  let tokensUsed = shop.tokensUsedToday || 0;
-  const lastResetDate = shop.quotaResetDate ? new Date(shop.quotaResetDate).toISOString().split('T')[0] : null;
+
+  // 获取全局配额信息
+  const result = await pool.query(`SELECT * FROM "GlobalQuota" WHERE "id" = 'global'`);
+  const globalQuota = result.rows[0];
+
+  if (!globalQuota) {
+    // 如果没有全局配额记录，创建一个
+    await pool.query(`
+      INSERT INTO "GlobalQuota" ("id", "dailyTokenQuota", "tokensUsedToday", "quotaResetDate", "updatedAt")
+      VALUES ('global', 10000000, 0, $1::date, NOW())
+    `, [today]);
+
+    return {
+      allowed: true,
+      tokensRemaining: 10000000,
+      quota: 10000000,
+      tokensUsed: 0,
+      quotaResetDate: today
+    };
+  }
+
+  const quota = globalQuota.dailyTokenQuota || 10000000; // 默认1000万 tokens/天
+  let tokensUsed = globalQuota.tokensUsedToday || 0;
+  const lastResetDate = globalQuota.quotaResetDate ? new Date(globalQuota.quotaResetDate).toISOString().split('T')[0] : null;
 
   // 检查是否需要重置（新的一天）
   if (lastResetDate !== today) {
-    console.log(`[TokenQuota] Resetting daily quota for shop ${shop.id} (last reset: ${lastResetDate}, today: ${today})`);
+    console.log(`[TokenQuota] Resetting global daily quota (last reset: ${lastResetDate}, today: ${today})`);
     tokensUsed = 0;
     // 更新数据库
     await pool.query(
-      `UPDATE "Shop" SET "tokensUsedToday" = 0, "quotaResetDate" = $1::date WHERE "id" = $2`,
-      [today, shop.id]
+      `UPDATE "GlobalQuota" SET "tokensUsedToday" = 0, "quotaResetDate" = $1::date, "updatedAt" = NOW() WHERE "id" = 'global'`,
+      [today]
     );
   }
 
@@ -716,27 +755,27 @@ async function checkDailyTokenQuota(shop) {
 }
 
 /**
- * 更新Token使用量
- * @param {string} shopId - Shop ID
+ * 更新全局Token使用量
  * @param {number} tokensUsed - 本次使用的token数
  */
-async function updateTokenUsage(shopId, tokensUsed) {
+async function updateTokenUsage(tokensUsed) {
   const today = new Date().toISOString().split('T')[0];
 
   try {
     await pool.query(`
-      UPDATE "Shop" SET
+      UPDATE "GlobalQuota" SET
         "tokensUsedToday" = CASE
           WHEN "quotaResetDate" = $1::date THEN "tokensUsedToday" + $2
           ELSE $2
         END,
-        "quotaResetDate" = $1::date
-      WHERE "id" = $3
-    `, [today, tokensUsed, shopId]);
+        "quotaResetDate" = $1::date,
+        "updatedAt" = NOW()
+      WHERE "id" = 'global'
+    `, [today, tokensUsed]);
 
-    console.log(`[TokenQuota] Updated token usage for shop ${shopId}: +${tokensUsed} tokens`);
+    console.log(`[TokenQuota] Updated global token usage: +${tokensUsed} tokens`);
   } catch (error) {
-    console.error('[TokenQuota] Failed to update token usage:', error);
+    console.error('[TokenQuota] Failed to update global token usage:', error);
   }
 }
 
@@ -942,7 +981,7 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
     // Check daily token quota (only for free plan)
     const plan = shop.plan || 'free';
     if (plan === 'free') {
-      const quotaCheck = await checkDailyTokenQuota(shop);
+      const quotaCheck = await checkDailyTokenQuota();
       if (!quotaCheck.allowed) {
         console.error(`[SYNC] ❌ Daily token quota exceeded: ${shop.domain}`);
         await monitor.fail(new Error('Daily token quota exceeded'));
@@ -1168,7 +1207,7 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
     // Get updated token quota info
     let tokenQuotaInfo = null;
     if (plan === 'free') {
-      const quotaCheck = await checkDailyTokenQuota({ ...shop, tokensUsedToday: (shop.tokensUsedToday || 0) + monitor.metrics.tokensUsed });
+      const quotaCheck = await checkDailyTokenQuota();
       tokenQuotaInfo = {
         tokensRemaining: quotaCheck.tokensRemaining,
         quota: quotaCheck.quota,
@@ -1329,7 +1368,7 @@ app.get('/api/shops/sync-status', auth, async (req, res) => {
     // Get token quota info (for free plan)
     let tokenQuota = null;
     if (plan === 'free') {
-      const quotaCheck = await checkDailyTokenQuota(shop);
+      const quotaCheck = await checkDailyTokenQuota();
       tokenQuota = {
         tokensRemaining: quotaCheck.tokensRemaining,
         quota: quotaCheck.quota,
@@ -1477,6 +1516,64 @@ app.delete('/api/products', auth, async (req, res) => {
     res.status(500).json({ error: e.message });
   } finally {
     client.release();
+  }
+});
+
+// ============ Global Quota Management (Admin Only) ============
+
+// Get current global quota settings
+app.get('/api/admin/global-quota', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM "GlobalQuota" WHERE "id" = \'global\'');
+
+    if (result.rows.length === 0) {
+      return res.json({
+        dailyTokenQuota: 10000000,
+        tokensUsedToday: 0,
+        quotaResetDate: new Date().toISOString().split('T')[0]
+      });
+    }
+
+    const quota = result.rows[0];
+    res.json({
+      dailyTokenQuota: quota.dailyTokenQuota,
+      tokensUsedToday: quota.tokensUsedToday,
+      quotaResetDate: quota.quotaResetDate,
+      updatedAt: quota.updatedAt
+    });
+  } catch (e) {
+    console.error('[Admin] Error getting global quota:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Update global quota settings
+app.put('/api/admin/global-quota', async (req, res) => {
+  try {
+    const { dailyTokenQuota } = req.body;
+
+    if (!dailyTokenQuota || dailyTokenQuota < 0) {
+      return res.status(400).json({ error: 'Invalid dailyTokenQuota value' });
+    }
+
+    // Update or insert global quota
+    await pool.query(`
+      INSERT INTO "GlobalQuota" ("id", "dailyTokenQuota", "tokensUsedToday", "quotaResetDate", "updatedAt")
+      VALUES ('global', $1, 0, $2::date, NOW())
+      ON CONFLICT ("id") DO UPDATE SET
+        "dailyTokenQuota" = $1,
+        "updatedAt" = NOW()
+    `, [dailyTokenQuota, new Date().toISOString().split('T')[0]]);
+
+    console.log(`[Admin] Updated global daily token quota to ${dailyTokenQuota}`);
+
+    res.json({
+      success: true,
+      dailyTokenQuota
+    });
+  } catch (e) {
+    console.error('[Admin] Error updating global quota:', e);
+    res.status(500).json({ error: e.message });
   }
 });
 
