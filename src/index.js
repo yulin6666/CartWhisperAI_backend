@@ -1204,7 +1204,7 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
 
     // 更新Token使用量（仅免费用户）
     if (plan === 'free' && monitor.metrics.tokensUsed > 0) {
-      await updateTokenUsage(shopId, monitor.metrics.tokensUsed);
+      await updateTokenUsage(monitor.metrics.tokensUsed);
       console.log(`[SYNC] 📊 Updated token usage: ${monitor.metrics.tokensUsed} tokens`);
     }
 
