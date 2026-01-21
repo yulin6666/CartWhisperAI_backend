@@ -703,19 +703,19 @@ async function checkDailyTokenQuota() {
     // 如果没有全局配额记录，创建一个
     await pool.query(`
       INSERT INTO "GlobalQuota" ("id", "dailyTokenQuota", "tokensUsedToday", "quotaResetDate", "updatedAt")
-      VALUES ('global', 10000000, 0, $1::date, NOW())
+      VALUES ('global', 140000000, 0, $1::date, NOW())
     `, [today]);
 
     return {
       allowed: true,
-      tokensRemaining: 10000000,
-      quota: 10000000,
+      tokensRemaining: 140000000,
+      quota: 140000000,
       tokensUsed: 0,
       quotaResetDate: today
     };
   }
 
-  const quota = globalQuota.dailyTokenQuota || 10000000; // 默认1000万 tokens/天
+  const quota = globalQuota.dailyTokenQuota || 140000000; // 默认1.4亿 tokens/天
   let tokensUsed = globalQuota.tokensUsedToday || 0;
   const lastResetDate = globalQuota.quotaResetDate ? new Date(globalQuota.quotaResetDate).toISOString().split('T')[0] : null;
 
