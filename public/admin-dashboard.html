@@ -1442,21 +1442,31 @@
       `;
 
       try {
-        const response = await fetch(`${API_BASE}/api/admin/shops`);
-        const data = await response.json();
+        // 并行获取shops数据和全局配额数据
+        const [shopsResponse, quotaResponse] = await Promise.all([
+          fetch(`${API_BASE}/api/admin/shops`),
+          fetch(`${API_BASE}/api/admin/global-quota`)
+        ]);
 
-        if (!data.success) {
-          throw new Error(data.error || 'Failed to load shops');
+        const shopsData = await shopsResponse.json();
+        const quotaData = await quotaResponse.json();
+
+        if (!shopsData.success) {
+          throw new Error(shopsData.error || 'Failed to load shops');
         }
 
-        const shops = data.shops;
+        const shops = shopsData.shops;
 
-        // 统计数据
+        // 统计数据 - 只计算FREE用户
         const totalShops = shops.length;
-        const freeShops = shops.filter(s => (s.plan || 'free') === 'free').length;
-        const totalQuota = shops.reduce((sum, s) => sum + (s.dailyTokenQuota || 10000), 0);
-        const totalUsed = shops.reduce((sum, s) => sum + (s.tokensUsedToday || 0), 0);
-        const totalRemaining = totalQuota - totalUsed;
+        const freeShops = shops.filter(s => (s.plan || 'free') === 'free');
+        const freeShopCount = freeShops.length;
+        const totalFreeUsed = freeShops.reduce((sum, s) => sum + (s.tokensUsedToday || 0), 0);
+
+        // 全局配额 - 从API获取
+        const globalQuota = quotaData.dailyTokenQuota || 140000000;
+        const totalRemaining = Math.max(0, globalQuota - totalFreeUsed);
+        const usagePercentage = globalQuota > 0 ? Math.min(100, (totalFreeUsed / globalQuota * 100).toFixed(1)) : 0;
 
         const html = `
           <div style="margin-bottom: 20px;">
@@ -1464,6 +1474,56 @@
             <p style="color: #666; margin-bottom: 20px;">
               管理每个商店的每日Token配额，防止服务器资源被滥用。免费用户默认每天10,000,000 tokens (1000万)。
             </p>
+
+            <!-- 全局配额设置 -->
+            <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 30px; border-radius: 12px; margin-bottom: 20px; color: white; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
+              <h3 style="margin: 0 0 20px 0; font-size: 20px;">🌍 全局FREE用户配额</h3>
+              <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-bottom: 20px;">
+                <div>
+                  <div style="font-size: 14px; opacity: 0.9; margin-bottom: 5px;">每日总配额</div>
+                  <div style="font-size: 32px; font-weight: 700;">${globalQuota.toLocaleString()}</div>
+                  <div style="font-size: 12px; opacity: 0.8;">tokens/天</div>
+                </div>
+                <div>
+                  <div style="font-size: 14px; opacity: 0.9; margin-bottom: 5px;">今日已使用</div>
+                  <div style="font-size: 32px; font-weight: 700;">${totalFreeUsed.toLocaleString()}</div>
+                  <div style="font-size: 12px; opacity: 0.8;">${freeShopCount} 个免费商店</div>
+                </div>
+                <div>
+                  <div style="font-size: 14px; opacity: 0.9; margin-bottom: 5px;">剩余配额</div>
+                  <div style="font-size: 32px; font-weight: 700;">${totalRemaining.toLocaleString()}</div>
+                  <div style="font-size: 12px; opacity: 0.8;">${usagePercentage}% 已使用</div>
+                </div>
+              </div>
+
+              <div style="background: rgba(255, 255, 255, 0.2); height: 12px; border-radius: 6px; overflow: hidden; margin-bottom: 20px;">
+                <div style="height: 100%; width: ${usagePercentage}%; background: ${usagePercentage > 80 ? '#ef4444' : usagePercentage > 50 ? '#f59e0b' : '#10b981'}; transition: width 0.3s;"></div>
+              </div>
+
+              <div style="display: flex; gap: 10px; align-items: center;">
+                <input
+                  type="number"
+                  id="globalQuotaInput"
+                  value="${globalQuota}"
+                  min="0"
+                  step="10000000"
+                  style="flex: 1; padding: 12px 15px; border: 2px solid rgba(255,255,255,0.3); border-radius: 8px; font-size: 16px; background: rgba(255,255,255,0.9); color: #333; font-weight: 600;"
+                  placeholder="设置全局配额"
+                />
+                <button
+                  onclick="updateGlobalQuota()"
+                  style="padding: 12px 24px; background: white; color: #667eea; border: none; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; white-space: nowrap;"
+                >
+                  💾 更新全局配额
+                </button>
+                <button
+                  onclick="resetAllFreeTokens()"
+                  style="padding: 12px 24px; background: rgba(255,255,255,0.2); color: white; border: 2px solid white; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; white-space: nowrap;"
+                >
+                  🔄 重置所有FREE用户
+                </button>
+              </div>
+            </div>
 
             <div class="stats-grid" style="margin-bottom: 20px;">
               <div class="stat-card">
@@ -1473,17 +1533,17 @@
               </div>
               <div class="stat-card info">
                 <h3>免费商店</h3>
-                <div class="value">${freeShops}</div>
+                <div class="value">${freeShopCount}</div>
                 <div class="subtitle">受配额限制</div>
               </div>
               <div class="stat-card warning">
-                <h3>总配额</h3>
-                <div class="value">${totalQuota.toLocaleString()}</div>
-                <div class="subtitle">tokens/天</div>
+                <h3>付费商店</h3>
+                <div class="value">${totalShops - freeShopCount}</div>
+                <div class="subtitle">不受配额限制</div>
               </div>
-              <div class="stat-card ${totalUsed > totalQuota * 0.8 ? 'danger' : 'success'}">
-                <h3>已使用</h3>
-                <div class="value">${totalUsed.toLocaleString()}</div>
+              <div class="stat-card ${totalFreeUsed > globalQuota * 0.8 ? 'danger' : 'success'}">
+                <h3>配额利用率</h3>
+                <div class="value">${usagePercentage}%</div>
                 <div class="subtitle">${totalRemaining.toLocaleString()} tokens 剩余</div>
               </div>
             </div>
@@ -1495,31 +1555,30 @@
                 <tr>
                   <th>商店域名</th>
                   <th>计划</th>
-                  <th>每日配额</th>
                   <th>今日已用</th>
-                  <th>剩余</th>
-                  <th>使用率</th>
+                  <th>使用占比</th>
                   <th>配额重置</th>
+                  <th>同步权限</th>
                   <th>操作</th>
                 </tr>
               </thead>
               <tbody>
                 ${shops.length === 0 ? `
                   <tr>
-                    <td colspan="8" style="text-align: center; padding: 40px; color: #999;">
+                    <td colspan="7" style="text-align: center; padding: 40px; color: #999;">
                       暂无商店数据
                     </td>
                   </tr>
                 ` : shops.map(shop => {
-                  const quota = shop.dailyTokenQuota || 10000000;
                   const used = shop.tokensUsedToday || 0;
-                  const remaining = Math.max(0, quota - used);
-                  const percentage = quota > 0 ? Math.min(100, (used / quota * 100).toFixed(1)) : 0;
-                  const resetDate = shop.quotaResetDate ? new Date(shop.quotaResetDate).toLocaleDateString('zh-CN') : '未设置';
                   const plan = (shop.plan || 'free').toUpperCase();
+                  const isFree = plan === 'FREE';
+                  const percentage = isFree && globalQuota > 0 ? ((used / globalQuota) * 100).toFixed(3) : 0;
+                  const resetDate = shop.quotaResetDate ? new Date(shop.quotaResetDate).toLocaleDateString('zh-CN') : '未设置';
+                  const isSyncEnabled = shop.isSyncEnabled !== false; // 默认为true
 
                   return `
-                    <tr>
+                    <tr style="${!isSyncEnabled ? 'opacity: 0.6; background: #fff3cd;' : ''}">
                       <td>
                         <strong>${shop.domain}</strong><br>
                         <small style="color: #999; font-family: monospace;">${shop.id}</small>
@@ -1527,46 +1586,44 @@
                       <td>
                         <span class="badge badge-${plan === 'FREE' ? 'info' : 'success'}">${plan}</span>
                       </td>
-                      <td>
-                        <input
-                          type="number"
-                          value="${quota}"
-                          min="0"
-                          step="1000"
-                          id="quota-${shop.id}"
-                          style="width: 100px; padding: 5px; border: 1px solid #ddd; border-radius: 4px;"
-                        />
-                      </td>
-                      <td style="font-weight: bold; color: ${used > quota * 0.8 ? '#dc3545' : '#333'};">
+                      <td style="font-weight: bold; color: ${isFree && used > globalQuota * 0.5 ? '#dc3545' : '#333'};">
                         ${used.toLocaleString()}
-                      </td>
-                      <td style="color: ${remaining === 0 ? '#dc3545' : '#28a745'};">
-                        ${remaining.toLocaleString()}
+                        ${!isFree ? '<br><small style="color: #999;">不受限制</small>' : ''}
                       </td>
                       <td>
-                        <div style="display: flex; align-items: center; gap: 8px;">
-                          <div style="flex: 1; height: 8px; background: #e9ecef; border-radius: 4px; overflow: hidden;">
-                            <div style="height: 100%; width: ${percentage}%; background: ${percentage > 80 ? '#dc3545' : percentage > 50 ? '#ffc107' : '#28a745'}; transition: width 0.3s;"></div>
+                        ${isFree ? `
+                          <div style="display: flex; align-items: center; gap: 8px;">
+                            <div style="flex: 1; height: 8px; background: #e9ecef; border-radius: 4px; overflow: hidden;">
+                              <div style="height: 100%; width: ${Math.min(100, percentage)}%; background: ${percentage > 50 ? '#dc3545' : percentage > 20 ? '#ffc107' : '#28a745'}; transition: width 0.3s;"></div>
+                            </div>
+                            <span style="font-size: 12px; font-weight: bold; min-width: 60px;">${percentage}%</span>
                           </div>
-                          <span style="font-size: 12px; font-weight: bold; min-width: 45px;">${percentage}%</span>
-                        </div>
+                        ` : '<span style="color: #999;">-</span>'}
                       </td>
                       <td style="font-size: 12px; color: #666;">${resetDate}</td>
                       <td>
-                        <div style="display: flex; gap: 5px;">
+                        ${!isSyncEnabled
+                          ? '<span class="badge badge-danger">🚫 已禁用</span>'
+                          : '<span class="badge badge-success">✅ 已启用</span>'
+                        }
+                      </td>
+                      <td>
+                        <div style="display: flex; gap: 5px; flex-wrap: wrap;">
+                          ${isFree ? `
+                            <button
+                              onclick="resetTokenUsage('${shop.id}', '${shop.domain}')"
+                              style="padding: 4px 8px; font-size: 11px; background: #28a745; color: white; border: none; border-radius: 4px; cursor: pointer;"
+                              title="重置今日使用量"
+                            >
+                              🔄 重置
+                            </button>
+                          ` : ''}
                           <button
-                            onclick="updateTokenQuota('${shop.id}', '${shop.domain}')"
-                            style="padding: 4px 8px; font-size: 11px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer;"
-                            title="更新配额"
+                            onclick="toggleSyncPermission('${shop.id}', '${shop.domain}', ${!isSyncEnabled})"
+                            style="padding: 4px 8px; font-size: 11px; background: ${isSyncEnabled ? '#dc3545' : '#007bff'}; color: white; border: none; border-radius: 4px; cursor: pointer;"
+                            title="${isSyncEnabled ? '禁用同步' : '启用同步'}"
                           >
-                            💾 保存
-                          </button>
-                          <button
-                            onclick="resetTokenUsage('${shop.id}', '${shop.domain}')"
-                            style="padding: 4px 8px; font-size: 11px; background: #28a745; color: white; border: none; border-radius: 4px; cursor: pointer;"
-                            title="重置今日使用量"
-                          >
-                            🔄 重置
+                            ${isSyncEnabled ? '🚫 禁用' : '✅ 启用'}
                           </button>
                         </div>
                       </td>
@@ -1580,11 +1637,11 @@
           <div style="margin-top: 20px; padding: 15px; background: #e8f5e9; border-radius: 8px; border: 1px solid #a5d6a7;">
             <h4 style="margin: 0 0 10px 0; color: #2e7d32;">💡 使用说明</h4>
             <ul style="margin: 0; padding-left: 20px; color: #2e7d32; line-height: 1.8;">
-              <li>每日配额：每个商店每天可以使用的最大Token数量</li>
-              <li>配额会在每天首次同步时自动重置</li>
-              <li>免费用户默认10,000,000 tokens/天 (1000万)，付费用户不受限制</li>
-              <li>可以手动调整配额或重置今日使用量</li>
-              <li>超过配额后，商店将无法进行同步操作，直到配额重置</li>
+              <li><strong>全局配额:</strong> 所有FREE用户共享一个每日Token总配额（默认140,000,000 tokens）</li>
+              <li><strong>配额重置:</strong> 每天首次同步时自动重置</li>
+              <li><strong>付费用户:</strong> 不受配额限制，可以无限使用</li>
+              <li><strong>同步权限:</strong> 可以单独禁用某个商店的同步功能，该商店将无法进行任何同步操作</li>
+              <li><strong>使用占比:</strong> 显示每个FREE商店占全局配额的百分比</li>
             </ul>
           </div>
         `;
@@ -1600,9 +1657,9 @@
       }
     }
 
-    // 更新Token配额
-    async function updateTokenQuota(shopId, domain) {
-      const input = document.getElementById(`quota-${shopId}`);
+    // 更新全局配额
+    async function updateGlobalQuota() {
+      const input = document.getElementById('globalQuotaInput');
       const newQuota = parseInt(input.value);
 
       if (isNaN(newQuota) || newQuota < 0) {
@@ -1610,12 +1667,12 @@
         return;
       }
 
-      if (!confirm(`确定要更新配额吗？\\n\\n商店: ${domain}\\n新配额: ${newQuota.toLocaleString()} tokens/天`)) {
+      if (!confirm(`确定要更新全局配额吗？\n\n新配额: ${newQuota.toLocaleString()} tokens/天\n\n这将影响所有FREE用户的配额。`)) {
         return;
       }
 
       try {
-        const response = await fetch(`${API_BASE}/api/admin/shops/${shopId}/token-quota`, {
+        const response = await fetch(`${API_BASE}/api/admin/global-quota`, {
           method: 'PUT',
           headers: {
             'Content-Type': 'application/json'
@@ -1629,15 +1686,83 @@
         }
 
         const result = await response.json();
-        console.log('Token quota updated:', result);
+        console.log('Global quota updated:', result);
 
-        alert(`成功更新配额！\\n\\n商店: ${domain}\\n新配额: ${newQuota.toLocaleString()} tokens/天`);
+        alert(`成功更新全局配额！\n\n新配额: ${newQuota.toLocaleString()} tokens/天`);
 
         // 重新加载Token配额数据
         await renderTokenQuotaUI();
       } catch (error) {
-        console.error('Failed to update token quota:', error);
+        console.error('Failed to update global quota:', error);
         alert(`更新失败: ${error.message}`);
+      }
+    }
+
+    // 重置所有FREE用户的Token使用量
+    async function resetAllFreeTokens() {
+      if (!confirm('确定要重置所有FREE用户的今日Token使用量吗？\n\n这将重置所有免费商店的Token使用统计。')) {
+        return;
+      }
+
+      try {
+        const response = await fetch(`${API_BASE}/api/admin/reset-all-free-tokens`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          }
+        });
+
+        if (!response.ok) {
+          const error = await response.json().catch(() => ({ error: 'Unknown error' }));
+          throw new Error(error.error || `HTTP ${response.status}`);
+        }
+
+        const result = await response.json();
+        console.log('All free tokens reset:', result);
+
+        alert(`成功重置所有FREE用户的Token使用量！\n\n重置了 ${result.resetCount} 个商店`);
+
+        // 重新加载Token配额数据
+        await renderTokenQuotaUI();
+      } catch (error) {
+        console.error('Failed to reset all free tokens:', error);
+        alert(`重置失败: ${error.message}`);
+      }
+    }
+
+    // 切换商店的同步权限
+    async function toggleSyncPermission(shopId, domain, enable) {
+      const action = enable ? '启用' : '禁用';
+      if (!confirm(`确定要${action}该商店的同步权限吗？\n\n商店: ${domain}\n\n${enable ? '启用后该商店可以进行同步操作' : '禁用后该商店将无法进行任何同步操作'}`)) {
+        return;
+      }
+
+      try {
+        const response = await fetch(`${API_BASE}/api/admin/shops/${shopId}/sync-permission`, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ isSyncEnabled: enable })
+        });
+
+        if (!response.ok) {
+          const error = await response.json().catch(() => ({ error: 'Unknown error' }));
+          throw new Error(error.error || `HTTP ${response.status}`);
+        }
+
+        const result = await response.json();
+        console.log('Sync permission updated:', result);
+
+        alert(`成功${action}同步权限！\n\n商店: ${domain}`);
+
+        // 重新加载Token配额数据
+        await renderTokenQuotaUI();
+        // 同时刷新商店列表
+        await loadShops();
+      } catch (error) {
+        console.error('Failed to toggle sync permission:', error);
+        alert(`操作失败: ${error.message}`);
       }
     }
 

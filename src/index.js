@@ -89,6 +89,9 @@ async function initDatabase() {
     await addColumn('Shop', 'dailyTokenQuota', 'INTEGER', '10000000');
     await addColumn('Shop', 'tokensUsedToday', 'INTEGER', '0');
     await addColumn('Shop', 'quotaResetDate', 'DATE', null);
+    // Sync permission control
+    await addColumn('Shop', 'isSyncEnabled', 'BOOLEAN', 'true');
+    await addColumn('Shop', 'globalTokenQuota', 'INTEGER', '140000000');
 
     // Recommendation tracking (impressions/clicks)
     await addColumn('Recommendation', 'impressions', 'INTEGER', '0');
@@ -141,7 +144,7 @@ async function initDatabase() {
     await client.query(`
       CREATE TABLE IF NOT EXISTS "GlobalQuota" (
         "id" TEXT PRIMARY KEY DEFAULT 'global',
-        "dailyTokenQuota" INTEGER DEFAULT 10000000,
+        "dailyTokenQuota" INTEGER DEFAULT 140000000,
         "tokensUsedToday" INTEGER DEFAULT 0,
         "quotaResetDate" DATE,
         "updatedAt" TIMESTAMP DEFAULT NOW()
@@ -151,7 +154,7 @@ async function initDatabase() {
     // 初始化全局配额记录（如果不存在）
     await client.query(`
       INSERT INTO "GlobalQuota" ("id", "dailyTokenQuota", "tokensUsedToday", "quotaResetDate", "updatedAt")
-      VALUES ('global', 10000000, 0, CURRENT_DATE, NOW())
+      VALUES ('global', 140000000, 0, CURRENT_DATE, NOW())
       ON CONFLICT ("id") DO NOTHING
     `);
 
@@ -956,6 +959,16 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
   await monitor.start();
 
   try {
+    // 检查商店是否被禁用同步
+    if (shop.isSyncEnabled === false) {
+      console.error(`[SYNC] ❌ ERROR: Sync is disabled for shop ${shop.domain}`);
+      await monitor.fail(new Error('Sync is disabled for this shop'));
+      return res.status(403).json({
+        error: 'Sync is disabled for this shop. Please contact support.',
+        code: 'SYNC_DISABLED'
+      });
+    }
+
     if (!Array.isArray(products) || !products.length) {
       console.error('[SYNC] ❌ ERROR: No products array received');
       await monitor.fail(new Error('Products required'));
@@ -1528,7 +1541,7 @@ app.get('/api/admin/global-quota', async (req, res) => {
 
     if (result.rows.length === 0) {
       return res.json({
-        dailyTokenQuota: 10000000,
+        dailyTokenQuota: 140000000,
         tokensUsedToday: 0,
         quotaResetDate: new Date().toISOString().split('T')[0]
       });
@@ -2451,6 +2464,61 @@ app.post('/api/admin/shops/:shopId/reset-tokens', async (req, res) => {
     });
   } catch (e) {
     console.error('[Admin] Error resetting tokens:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Reset all FREE users' token usage
+app.post('/api/admin/reset-all-free-tokens', async (req, res) => {
+  try {
+    const result = await pool.query(
+      `UPDATE "Shop" SET "tokensUsedToday" = 0, "quotaResetDate" = NULL, "updatedAt" = NOW()
+       WHERE "plan" = 'free'
+       RETURNING "id", "domain", "tokensUsedToday"`
+    );
+
+    const resetCount = result.rows.length;
+    console.log(`[Admin] Reset token usage for ${resetCount} FREE shops`);
+
+    res.json({
+      success: true,
+      resetCount: resetCount,
+      shops: result.rows
+    });
+  } catch (e) {
+    console.error('[Admin] Error resetting all free tokens:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Toggle shop sync permission
+app.put('/api/admin/shops/:shopId/sync-permission', async (req, res) => {
+  try {
+    const { shopId } = req.params;
+    const { isSyncEnabled } = req.body;
+
+    if (typeof isSyncEnabled !== 'boolean') {
+      return res.status(400).json({ error: 'isSyncEnabled must be a boolean' });
+    }
+
+    const result = await pool.query(
+      `UPDATE "Shop" SET "isSyncEnabled" = $1, "updatedAt" = NOW() WHERE "id" = $2 RETURNING *`,
+      [isSyncEnabled, shopId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Shop not found' });
+    }
+
+    const shop = result.rows[0];
+    console.log(`[Admin] ${isSyncEnabled ? 'Enabled' : 'Disabled'} sync permission for ${shop.domain}`);
+
+    res.json({
+      success: true,
+      shop: result.rows[0]
+    });
+  } catch (e) {
+    console.error('[Admin] Error updating sync permission:', e);
     res.status(500).json({ error: e.message });
   }
 });
