@@ -1,6 +1,6 @@
--- 更新全局配额为1.4亿tokens
+-- 更新全局配额为1000万tokens
 UPDATE "GlobalQuota" 
-SET "dailyTokenQuota" = 140000000, 
+SET "dailyTokenQuota" = 10000000, 
     "tokensUsedToday" = 0,
     "quotaResetDate" = CURRENT_DATE,
     "updatedAt" = NOW()
