@@ -2344,7 +2344,8 @@ app.get('/api/admin/shops', async (req, res) => {
         "createdAt",
         "dailyTokenQuota",
         "tokensUsedToday",
-        "quotaResetDate"
+        "quotaResetDate",
+        "isSyncEnabled"
       FROM "Shop"
       ORDER BY "createdAt" DESC
     `);
