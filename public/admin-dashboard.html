@@ -242,6 +242,12 @@
       font-size: 12px;
       font-weight: 600;
       text-transform: uppercase;
+      transition: all 0.2s ease;
+    }
+
+    .badge:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.15);
     }
 
     .badge-success {
@@ -1602,10 +1608,14 @@
                       </td>
                       <td style="font-size: 12px; color: #666;">${resetDate}</td>
                       <td>
-                        ${!isSyncEnabled
-                          ? '<span class="badge badge-danger">🚫 已禁用</span>'
-                          : '<span class="badge badge-success">✅ 已启用</span>'
-                        }
+                        <span
+                          class="badge ${!isSyncEnabled ? 'badge-danger' : 'badge-success'}"
+                          style="cursor: pointer; user-select: none;"
+                          onclick="toggleSyncPermission('${shop.id}', '${shop.domain}', ${!isSyncEnabled})"
+                          title="点击切换同步权限"
+                        >
+                          ${!isSyncEnabled ? '🚫 已禁用' : '✅ 已启用'}
+                        </span>
                       </td>
                       <td>
                         <div style="display: flex; gap: 5px; flex-wrap: wrap;">
