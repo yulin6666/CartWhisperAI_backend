@@ -758,13 +758,15 @@ async function checkDailyTokenQuota() {
 }
 
 /**
- * 更新全局Token使用量
+ * 更新全局Token使用量和商店Token使用量
  * @param {number} tokensUsed - 本次使用的token数
+ * @param {string} shopId - 商店ID
  */
-async function updateTokenUsage(tokensUsed) {
+async function updateTokenUsage(tokensUsed, shopId) {
   const today = new Date().toISOString().split('T')[0];
 
   try {
+    // 更新全局配额
     await pool.query(`
       UPDATE "GlobalQuota" SET
         "tokensUsedToday" = CASE
@@ -776,7 +778,21 @@ async function updateTokenUsage(tokensUsed) {
       WHERE "id" = 'global'
     `, [today, tokensUsed]);
 
-    console.log(`[TokenQuota] Updated global token usage: +${tokensUsed} tokens`);
+    // 更新商店配额
+    if (shopId) {
+      await pool.query(`
+        UPDATE "Shop" SET
+          "tokensUsedToday" = CASE
+            WHEN "quotaResetDate" = $1::date THEN "tokensUsedToday" + $2
+            ELSE $2
+          END,
+          "quotaResetDate" = $1::date,
+          "updatedAt" = NOW()
+        WHERE "id" = $3
+      `, [today, tokensUsed, shopId]);
+    }
+
+    console.log(`[TokenQuota] Updated token usage: +${tokensUsed} tokens (shop: ${shopId || 'N/A'})`);
   } catch (error) {
     console.error('[TokenQuota] Failed to update global token usage:', error);
   }
@@ -1204,7 +1220,7 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
 
     // 更新Token使用量（仅免费用户）
     if (plan === 'free' && monitor.metrics.tokensUsed > 0) {
-      await updateTokenUsage(monitor.metrics.tokensUsed);
+      await updateTokenUsage(monitor.metrics.tokensUsed, shopId);
       console.log(`[SYNC] 📊 Updated token usage: ${monitor.metrics.tokensUsed} tokens`);
     }
 
