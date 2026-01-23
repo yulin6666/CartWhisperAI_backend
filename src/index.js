@@ -525,6 +525,29 @@ async function generateRecommendations(products, allProducts = null) {
       continue;
     }
 
+    // 智能选择候选商品：优先配饰，其次按价格排序，限制20个
+    const accessories = [];
+    const nonAccessories = [];
+
+    // 分类：配饰 vs 非配饰
+    others.forEach(p => {
+      const category = getCategory(p);
+      const isAccessory = ['hat', 'jewelry', 'bag', 'sock', 'shoe', 'accessory'].includes(category);
+      if (isAccessory) {
+        accessories.push(p);
+      } else {
+        nonAccessories.push(p);
+      }
+    });
+
+    // 按价格排序非配饰商品（价格低的优先）
+    nonAccessories.sort((a, b) => a.price - b.price);
+
+    // 组合：优先配饰，不够则补充低价商品
+    const limitedOthers = [...accessories, ...nonAccessories].slice(0, 20);
+
+    console.log(`[AI] Selected ${limitedOthers.length} candidates (${accessories.length} accessories + ${Math.min(nonAccessories.length, 20 - accessories.length)} low-price items) from ${others.length} total`);
+
     const prompt = `You are an e-commerce cross-sell recommendation expert. Please recommend 3 best matching products for the following item.
 
 [Source Product]
@@ -532,7 +555,7 @@ ${summarize(product)}
 Price: $${product.price}
 
 [Candidate Products]
-${others.map((p, i) => `${i + 1}. ID:${p.productId} | ${summarize(p)} | $${p.price}`).join('\n')}
+${limitedOthers.map((p, i) => `${i + 1}. ID:${p.productId} | ${summarize(p)} | $${p.price}`).join('\n')}
 
 [Core Rules - Must Follow Strictly]
 1. Gender must match: [Men] products can only recommend [Men] or unisex items, [Women] products can only recommend [Women] or unisex items
