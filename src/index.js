@@ -6,7 +6,13 @@ const { Pool } = require('pg');
 const crypto = require('crypto');
 const path = require('path');
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  max: 100, // 最大连接数（使用数据库的全部100个连接）
+  idleTimeoutMillis: 10000, // 空闲连接10秒后释放（加快释放）
+  connectionTimeoutMillis: 5000, // 连接超时时间
+  allowExitOnIdle: false, // 保持进程运行
+});
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -324,6 +330,21 @@ const queryLimiter = rateLimit({ windowMs: 60000, max: 300 });
 const cache = new Map();
 const CACHE_TTL = 300000;
 
+// 定期清理过期缓存（每分钟执行一次）
+setInterval(() => {
+  const now = Date.now();
+  let cleanedCount = 0;
+  for (const [key, value] of cache.entries()) {
+    if (value.expiry < now) {
+      cache.delete(key);
+      cleanedCount++;
+    }
+  }
+  if (cleanedCount > 0) {
+    console.log(`[Cache] Cleaned ${cleanedCount} expired entries, current size: ${cache.size}`);
+  }
+}, 60000); // 每60秒清理一次
+
 // API 限额配置
 const API_LIMITS = {
   free: 5000,   // 5,000 calls/day
@@ -371,13 +392,18 @@ async function trackApiUsage(req, res, next) {
     });
   }
 
-  // 更新计数（异步，不阻塞响应）
-  pool.query(`
-    UPDATE "Shop" SET
-      "apiCallsToday" = CASE WHEN "apiCallsDate" = $1::date THEN "apiCallsToday" + 1 ELSE 1 END,
-      "apiCallsDate" = $1::date
-    WHERE "id" = $2
-  `, [today, shop.id]).catch(e => console.error('[API Usage] Update error:', e.message));
+  // 使用原子操作更新计数（同步等待）
+  try {
+    await pool.query(`
+      UPDATE "Shop" SET
+        "apiCallsToday" = CASE WHEN "apiCallsDate" = $1::date THEN "apiCallsToday" + 1 ELSE 1 END,
+        "apiCallsDate" = $1::date
+      WHERE "id" = $2
+    `, [today, shop.id]);
+  } catch (e) {
+    console.error('[API Usage] Update error:', e.message);
+    // 即使更新失败，也继续处理请求，避免阻塞用户
+  }
 
   // 添加响应头显示限额信息
   res.set('X-RateLimit-Limit', limit);
@@ -781,43 +807,97 @@ async function checkDailyTokenQuota() {
 }
 
 /**
- * 更新全局Token使用量和商店Token使用量
+ * 更新全局Token使用量和商店Token使用量（使用行级锁防止竞态条件）
  * @param {number} tokensUsed - 本次使用的token数
  * @param {string} shopId - 商店ID
+ * @param {object} client - 可选的数据库客户端（如果在事务中调用）
  */
-async function updateTokenUsage(tokensUsed, shopId) {
+async function updateTokenUsage(tokensUsed, shopId, client = null) {
   const today = new Date().toISOString().split('T')[0];
+  const ownClient = !client;
+
+  if (ownClient) {
+    client = await pool.connect();
+  }
 
   try {
-    // 更新全局配额
-    await pool.query(`
-      UPDATE "GlobalQuota" SET
-        "tokensUsedToday" = CASE
-          WHEN "quotaResetDate" = $1::date THEN "tokensUsedToday" + $2
-          ELSE $2
-        END,
-        "quotaResetDate" = $1::date,
-        "updatedAt" = NOW()
-      WHERE "id" = 'global'
-    `, [today, tokensUsed]);
-
-    // 更新商店配额
-    if (shopId) {
-      await pool.query(`
-        UPDATE "Shop" SET
-          "tokensUsedToday" = CASE
-            WHEN "quotaResetDate" = $1::date THEN "tokensUsedToday" + $2
-            ELSE $2
-          END,
-          "quotaResetDate" = $1::date,
-          "updatedAt" = NOW()
-        WHERE "id" = $3
-      `, [today, tokensUsed, shopId]);
+    if (ownClient) {
+      await client.query('BEGIN');
     }
 
+    // 使用行级锁更新全局配额
+    const globalResult = await client.query(`
+      SELECT "tokensUsedToday", "quotaResetDate", "dailyTokenQuota"
+      FROM "GlobalQuota"
+      WHERE "id" = 'global'
+      FOR UPDATE
+    `);
+
+    if (globalResult.rows.length > 0) {
+      const global = globalResult.rows[0];
+      const lastResetDate = global.quotaResetDate ? new Date(global.quotaResetDate).toISOString().split('T')[0] : null;
+
+      let newTokensUsed = tokensUsed;
+      if (lastResetDate === today) {
+        newTokensUsed = (global.tokensUsedToday || 0) + tokensUsed;
+      }
+
+      await client.query(`
+        UPDATE "GlobalQuota" SET
+          "tokensUsedToday" = $1,
+          "quotaResetDate" = $2::date,
+          "updatedAt" = NOW()
+        WHERE "id" = 'global'
+      `, [newTokensUsed, today]);
+
+      // 检查是否超过配额
+      if (newTokensUsed > global.dailyTokenQuota) {
+        console.warn(`[TokenQuota] WARNING: Global quota exceeded (${newTokensUsed}/${global.dailyTokenQuota})`);
+      }
+    }
+
+    // 使用行级锁更新商店配额
+    if (shopId) {
+      const shopResult = await client.query(`
+        SELECT "tokensUsedToday", "quotaResetDate"
+        FROM "Shop"
+        WHERE "id" = $1
+        FOR UPDATE
+      `, [shopId]);
+
+      if (shopResult.rows.length > 0) {
+        const shop = shopResult.rows[0];
+        const lastResetDate = shop.quotaResetDate ? new Date(shop.quotaResetDate).toISOString().split('T')[0] : null;
+
+        let newTokensUsed = tokensUsed;
+        if (lastResetDate === today) {
+          newTokensUsed = (shop.tokensUsedToday || 0) + tokensUsed;
+        }
+
+        await client.query(`
+          UPDATE "Shop" SET
+            "tokensUsedToday" = $1,
+            "quotaResetDate" = $2::date,
+            "updatedAt" = NOW()
+          WHERE "id" = $3
+        `, [newTokensUsed, today, shopId]);
+      }
+    }
+
+    if (ownClient) {
+      await client.query('COMMIT');
+    }
     console.log(`[TokenQuota] Updated token usage: +${tokensUsed} tokens (shop: ${shopId || 'N/A'})`);
   } catch (error) {
+    if (ownClient) {
+      await client.query('ROLLBACK');
+    }
     console.error('[TokenQuota] Failed to update global token usage:', error);
+    throw error;
+  } finally {
+    if (ownClient) {
+      client.release();
+    }
   }
 }
 
@@ -911,7 +991,38 @@ app.post('/api/shops/register', async (req, res) => {
 app.get('/api/health', async (req, res) => {
   try {
     await pool.query('SELECT 1');
-    res.json({ status: 'ok', ai: !!process.env.DEEPSEEK_API_KEY });
+
+    // 查询数据库最大连接数
+    const maxConnResult = await pool.query('SHOW max_connections');
+    const dbMaxConnections = parseInt(maxConnResult.rows[0].max_connections);
+
+    // 获取连接池状态
+    const poolStatus = {
+      totalCount: pool.totalCount,
+      idleCount: pool.idleCount,
+      waitingCount: pool.waitingCount,
+      maxConnections: pool.options.max || 500,
+      activeConnections: pool.totalCount - pool.idleCount,
+      utilizationPercentage: pool.totalCount > 0
+        ? Math.round(((pool.totalCount - pool.idleCount) / (pool.options.max || 500)) * 100)
+        : 0,
+      // 数据库服务器信息
+      database: {
+        maxConnections: dbMaxConnections,
+        poolMaxConnections: pool.options.max || 500,
+        isPoolSizeValid: (pool.options.max || 500) <= dbMaxConnections,
+        recommendation: (pool.options.max || 500) > dbMaxConnections
+          ? `警告: 连接池大小(${pool.options.max})超过数据库最大连接数(${dbMaxConnections})，建议调整为 ${Math.floor(dbMaxConnections * 0.8)}`
+          : '配置正常'
+      }
+    };
+
+    res.json({
+      status: 'ok',
+      ai: !!process.env.DEEPSEEK_API_KEY,
+      pool: poolStatus,
+      timestamp: new Date().toISOString()
+    });
   } catch (e) {
     res.status(500).json({ status: 'error', message: e.message });
   }
@@ -998,10 +1109,14 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
   await monitor.start();
 
   try {
+    // 开始事务
+    await client.query('BEGIN');
+
     // 检查商店是否被禁用同步
     if (shop.isSyncEnabled === false) {
       console.error(`[SYNC] ❌ ERROR: Sync is disabled for shop ${shop.domain}`);
       await monitor.fail(new Error('Sync is disabled for this shop'));
+      await client.query('ROLLBACK');
       return res.status(403).json({
         error: 'Sync is disabled for this shop. Please contact support.',
         code: 'SYNC_DISABLED'
@@ -1011,6 +1126,7 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
     if (!Array.isArray(products) || !products.length) {
       console.error('[SYNC] ❌ ERROR: No products array received');
       await monitor.fail(new Error('Products required'));
+      await client.query('ROLLBACK');
       return res.status(400).json({ error: 'Products required' });
     }
 
@@ -1022,6 +1138,7 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
     if (!accessCheck.allowed) {
       console.error(`[SYNC] ❌ Development store access denied: ${shop.domain}`);
       await monitor.fail(new Error('Development store access denied'));
+      await client.query('ROLLBACK');
       return res.status(403).json({
         error: accessCheck.reason,
         isDevelopmentStore: true,
@@ -1037,6 +1154,7 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
       if (!quotaCheck.allowed) {
         console.error(`[SYNC] ❌ Daily token quota exceeded: ${shop.domain}`);
         await monitor.fail(new Error('Daily token quota exceeded'));
+        await client.query('ROLLBACK');
         return res.status(429).json({
           error: quotaCheck.reason,
           tokenQuotaExceeded: true,
@@ -1049,18 +1167,49 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
       console.log(`[SYNC] ✅ Token quota check passed: ${quotaCheck.tokensRemaining}/${quotaCheck.quota} tokens remaining`);
     }
 
-    // Check refresh rate limit for manual refresh
+    // Check refresh rate limit for manual refresh (使用行级锁)
     if (mode === 'refresh' || regenerate) {
-      const refreshCheck = canRefresh(shop);
-      if (!refreshCheck.allowed) {
-        return res.status(429).json({
-          error: 'Refresh rate limit exceeded',
-          limit: refreshCheck.limit,
-          used: refreshCheck.used,
-          remaining: refreshCheck.remaining,
-          nextRefreshAt: refreshCheck.nextRefreshAt,
-          plan: refreshCheck.plan
-        });
+      // 使用行级锁获取最新的刷新计数
+      const shopLockResult = await client.query(`
+        SELECT "refreshCount", "refreshMonth", "plan"
+        FROM "Shop"
+        WHERE "id" = $1
+        FOR UPDATE
+      `, [shopId]);
+
+      if (shopLockResult.rows.length > 0) {
+        const lockedShop = shopLockResult.rows[0];
+        const currentMonth = new Date().toISOString().slice(0, 7);
+
+        let refreshCount = lockedShop.refreshCount || 0;
+        if (lockedShop.refreshMonth !== currentMonth) {
+          refreshCount = 0; // 新月份，重置计数
+        }
+
+        const plan = lockedShop.plan || 'free';
+        const REFRESH_LIMITS = {
+          free: 0,   // 0次/月（不允许）
+          pro: 3,    // 3次/月
+          max: 10    // 10次/月
+        };
+        const limit = REFRESH_LIMITS[plan] || REFRESH_LIMITS.free;
+
+        if (refreshCount >= limit) {
+          // 计算下次可刷新时间（下个月1号）
+          const nextMonth = new Date(currentMonth + '-01');
+          nextMonth.setMonth(nextMonth.getMonth() + 1);
+
+          await monitor.fail(new Error('Refresh rate limit exceeded'));
+          await client.query('ROLLBACK');
+          return res.status(429).json({
+            error: 'Refresh rate limit exceeded',
+            limit,
+            used: refreshCount,
+            remaining: 0,
+            nextRefreshAt: nextMonth.toISOString(),
+            plan
+          });
+        }
       }
     }
 
@@ -1191,18 +1340,29 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
     } else if (actualMode === 'refresh') {
       updateFields.lastRefreshAt = new Date();
 
-      // 更新月度刷新计数
-      const lastMonth = shop.refreshMonth;
-      if (lastMonth !== currentMonth) {
-        // 新月份，重置为1
-        updateFields.refreshCount = 1;
-        updateFields.refreshMonth = currentMonth;
-      } else {
-        // 同一月份，增加计数
-        updateFields.refreshCount = (shop.refreshCount || 0) + 1;
-        updateFields.refreshMonth = currentMonth;
+      // 使用行级锁重新获取最新的刷新计数（防止竞态条件）
+      const shopRefreshResult = await client.query(`
+        SELECT "refreshCount", "refreshMonth"
+        FROM "Shop"
+        WHERE "id" = $1
+        FOR UPDATE
+      `, [shopId]);
+
+      if (shopRefreshResult.rows.length > 0) {
+        const currentShop = shopRefreshResult.rows[0];
+        const lastMonth = currentShop.refreshMonth;
+
+        if (lastMonth !== currentMonth) {
+          // 新月份，重置为1
+          updateFields.refreshCount = 1;
+          updateFields.refreshMonth = currentMonth;
+        } else {
+          // 同一月份，增加计数
+          updateFields.refreshCount = (currentShop.refreshCount || 0) + 1;
+          updateFields.refreshMonth = currentMonth;
+        }
+        console.log(`[SYNC] Updating refresh count: ${updateFields.refreshCount}`);
       }
-      console.log(`[SYNC] Updating refresh count: ${updateFields.refreshCount}`);
     }
 
     await client.query(`
@@ -1243,7 +1403,7 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
 
     // 更新Token使用量（仅免费用户）
     if (plan === 'free' && monitor.metrics.tokensUsed > 0) {
-      await updateTokenUsage(monitor.metrics.tokensUsed, shopId);
+      await updateTokenUsage(monitor.metrics.tokensUsed, shopId, client);
       console.log(`[SYNC] 📊 Updated token usage: ${monitor.metrics.tokensUsed} tokens`);
     }
 
@@ -1268,7 +1428,16 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
       };
     }
 
-    res.json({
+    // 提交事务
+    console.log('[SYNC] 💾 Committing transaction...');
+    await client.query('COMMIT');
+    console.log('[SYNC] ✅ Transaction committed successfully');
+
+    // 立即释放数据库连接
+    client.release();
+    console.log('[SYNC] 🔓 Database connection released');
+
+    const responseData = {
       success: true,
       mode: actualMode,
       products: saved.length,
@@ -1282,13 +1451,25 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
       },
       canRefresh: refreshCheck.allowed,
       tokenQuota: tokenQuotaInfo
-    });
+    };
+
+    console.log('[SYNC] 📤 Sending response to client...');
+    res.json(responseData);
+    console.log('[SYNC] ✅ Response sent successfully');
   } catch (e) {
+    // 回滚事务
+    await client.query('ROLLBACK');
     console.error('[Sync] Error:', e);
     await monitor.fail(e);
+
+    // 确保连接被释放
+    try {
+      client.release();
+    } catch (releaseError) {
+      console.error('[Sync] Error releasing connection:', releaseError);
+    }
+
     res.status(500).json({ error: e.message });
-  } finally {
-    client.release();
   }
 });
 
@@ -1394,6 +1575,15 @@ app.get('/api/storefront/recommendations', queryLimiter, async (req, res) => {
 app.get('/api/shops/sync-status', auth, async (req, res) => {
   try {
     const shop = req.shop;
+    const cacheKey = `sync-status:${shop.id}`;
+
+    // 检查缓存（30秒有效期）
+    const cached = cache.get(cacheKey);
+    if (cached && cached.expiry > Date.now()) {
+      console.log(`[SyncStatus] Cache hit for shop ${shop.domain}`);
+      return res.json(cached.data);
+    }
+
     const refreshStatus = canRefresh(shop);
 
     // Get product and recommendation counts
@@ -1429,7 +1619,7 @@ app.get('/api/shops/sync-status', auth, async (req, res) => {
       };
     }
 
-    res.json({
+    const responseData = {
       success: true,
       syncStatus: {
         initialSyncDone: shop.initialSyncDone || false,
@@ -1456,7 +1646,15 @@ app.get('/api/shops/sync-status', auth, async (req, res) => {
         // Token quota (free plan only)
         tokenQuota: tokenQuota
       }
+    };
+
+    // 缓存结果（30秒）
+    cache.set(cacheKey, {
+      data: responseData,
+      expiry: Date.now() + 30000
     });
+
+    res.json(responseData);
   } catch (e) {
     console.error('[SyncStatus] Error:', e);
     res.status(500).json({ error: e.message });
@@ -1520,6 +1718,7 @@ app.get('/api/recommendations', queryLimiter, auth, async (req, res) => {
 app.delete('/api/recommendations', auth, async (req, res) => {
   const client = await pool.connect();
   try {
+    await client.query('BEGIN');
     const shopId = req.shop.id;
 
     // 先删除推荐（外键约束）
@@ -1527,6 +1726,7 @@ app.delete('/api/recommendations', auth, async (req, res) => {
     // 再删除商品
     const prodResult = await client.query('DELETE FROM "Product" WHERE "shopId" = $1', [shopId]);
 
+    await client.query('COMMIT');
     console.log(`[Admin] Deleted ${prodResult.rowCount} products and ${recResult.rowCount} recommendations for ${req.shop.domain}`);
     cache.clear();
     res.json({
@@ -1536,6 +1736,7 @@ app.delete('/api/recommendations', auth, async (req, res) => {
       deletedRecommendations: recResult.rowCount
     });
   } catch (e) {
+    await client.query('ROLLBACK');
     console.error('[Admin] Error:', e);
     res.status(500).json({ error: e.message });
   } finally {
@@ -1547,6 +1748,7 @@ app.delete('/api/recommendations', auth, async (req, res) => {
 app.delete('/api/products', auth, async (req, res) => {
   const client = await pool.connect();
   try {
+    await client.query('BEGIN');
     const shopId = req.shop.id;
 
     // 先删除推荐（外键约束）
@@ -1554,6 +1756,7 @@ app.delete('/api/products', auth, async (req, res) => {
     // 再删除商品
     const prodResult = await client.query('DELETE FROM "Product" WHERE "shopId" = $1', [shopId]);
 
+    await client.query('COMMIT');
     console.log(`[Admin] Deleted ${prodResult.rowCount} products and ${recResult.rowCount} recommendations for ${req.shop.domain}`);
     cache.clear();
     res.json({
@@ -1564,6 +1767,7 @@ app.delete('/api/products', auth, async (req, res) => {
       }
     });
   } catch (e) {
+    await client.query('ROLLBACK');
     console.error('[Admin] Error:', e);
     res.status(500).json({ error: e.message });
   } finally {
@@ -1820,7 +2024,10 @@ app.get('/api/shops/:domain/plan', async (req, res) => {
 
 // Update shop plan (for testing/admin)
 app.put('/api/shops/:domain/plan', async (req, res) => {
+  const client = await pool.connect();
   try {
+    await client.query('BEGIN');
+
     const domain = req.params.domain.replace(/^https?:\/\//, '').replace(/\/$/, '');
     const { plan, shopifySubscriptionId, billingStatus, lastRefreshAt } = req.body;
 
@@ -1851,6 +2058,7 @@ app.put('/api/shops/:domain/plan', async (req, res) => {
     }
 
     if (updates.length === 0) {
+      await client.query('ROLLBACK');
       return res.status(400).json({ error: 'No fields to update' });
     }
 
@@ -1858,11 +2066,14 @@ app.put('/api/shops/:domain/plan', async (req, res) => {
     values.push(domain);
 
     const query = `UPDATE "Shop" SET ${updates.join(', ')} WHERE "domain" = $${paramIndex} RETURNING *`;
-    const result = await pool.query(query, values);
+    const result = await client.query(query, values);
 
     if (result.rows.length === 0) {
+      await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Shop not found' });
     }
+
+    await client.query('COMMIT');
 
     console.log(`[Plan] Updated ${domain}: ${JSON.stringify(req.body)}`);
     res.json({
@@ -1870,8 +2081,11 @@ app.put('/api/shops/:domain/plan', async (req, res) => {
       ...result.rows[0]
     });
   } catch (e) {
+    await client.query('ROLLBACK');
     console.error('[Plan] Error:', e);
     res.status(500).json({ error: e.message });
+  } finally {
+    client.release();
   }
 });
 
@@ -2565,10 +2779,17 @@ app.put('/api/admin/shops/:shopId/sync-permission', async (req, res) => {
 
 // ============ Start ============
 initDatabase().then(() => {
-  app.listen(PORT, () => {
+  const server = app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
     console.log(`AI: ${process.env.DEEPSEEK_API_KEY ? 'ON' : 'OFF'}`);
   });
+
+  // 设置超时时间为 35 分钟（比前端的 30 分钟稍长）
+  server.timeout = 2100000; // 35 分钟
+  server.headersTimeout = 2100000; // 35 分钟
+  server.keepAliveTimeout = 2100000; // 35 分钟
+
+  console.log(`Server timeouts set to 35 minutes`);
 }).catch(e => {
   console.error('Failed to start:', e);
   process.exit(1);
