@@ -1242,6 +1242,16 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
             plan
           });
         }
+
+        // ✅ 立即更新refreshCount，防止用户重复点击
+        console.log(`[SYNC] 🔒 Immediately updating refreshCount: ${refreshCount} -> ${refreshCount + 1}`);
+        await client.query(`
+          UPDATE "Shop"
+          SET "refreshCount" = $1,
+              "refreshMonth" = $2
+          WHERE "id" = $3
+        `, [refreshCount + 1, currentMonth, shopId]);
+        console.log(`[SYNC] ✅ RefreshCount updated immediately to prevent duplicate clicks`);
       }
     }
 
@@ -1391,30 +1401,8 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
       console.log('[SYNC] Setting initialSyncDone = true');
     } else if (actualMode === 'refresh') {
       updateFields.lastRefreshAt = new Date();
-
-      // 使用行级锁重新获取最新的刷新计数（防止竞态条件）
-      const shopRefreshResult = await client.query(`
-        SELECT "refreshCount", "refreshMonth"
-        FROM "Shop"
-        WHERE "id" = $1
-        FOR UPDATE
-      `, [shopId]);
-
-      if (shopRefreshResult.rows.length > 0) {
-        const currentShop = shopRefreshResult.rows[0];
-        const lastCycle = currentShop.refreshMonth;
-
-        if (lastCycle !== currentCycle) {
-          // 新周期，重置为1
-          updateFields.refreshCount = 1;
-          updateFields.refreshMonth = currentCycle;
-        } else {
-          // 同一周期，增加计数
-          updateFields.refreshCount = (currentShop.refreshCount || 0) + 1;
-          updateFields.refreshMonth = currentCycle;
-        }
-        console.log(`[SYNC] Updating refresh count: ${updateFields.refreshCount} (cycle: ${currentCycle})`);
-      }
+      // refreshCount 已经在前面立即更新了，这里不再重复更新
+      console.log('[SYNC] Setting lastRefreshAt (refreshCount already updated earlier)');
     }
 
     await client.query(`
@@ -1422,17 +1410,13 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
         "productCount" = $1,
         "updatedAt" = $2,
         "initialSyncDone" = COALESCE($3, "initialSyncDone"),
-        "lastRefreshAt" = COALESCE($4, "lastRefreshAt"),
-        "refreshCount" = COALESCE($5, "refreshCount"),
-        "refreshMonth" = COALESCE($6, "refreshMonth")
-      WHERE "id" = $7
+        "lastRefreshAt" = COALESCE($4, "lastRefreshAt")
+      WHERE "id" = $5
     `, [
       updateFields.productCount,
       updateFields.updatedAt,
       updateFields.initialSyncDone || null,
       updateFields.lastRefreshAt || null,
-      updateFields.refreshCount !== undefined ? updateFields.refreshCount : null,
-      updateFields.refreshMonth || null,
       shopId
     ]);
 
@@ -1460,11 +1444,18 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
     }
 
     // Calculate next refresh time with updated shop data
+    // 从数据库重新查询最新的refreshCount（因为它在前面已经立即更新了）
+    const latestShopResult = await client.query(
+      `SELECT "refreshCount", "refreshMonth" FROM "Shop" WHERE "id" = $1`,
+      [shopId]
+    );
+    const latestShop = latestShopResult.rows[0];
+
     const updatedShop = {
       ...shop,
       lastRefreshAt: updateFields.lastRefreshAt || shop.lastRefreshAt,
-      refreshCount: updateFields.refreshCount !== undefined ? updateFields.refreshCount : shop.refreshCount,
-      refreshMonth: updateFields.refreshMonth || shop.refreshMonth
+      refreshCount: latestShop.refreshCount,
+      refreshMonth: latestShop.refreshMonth
     };
     const refreshCheck = canRefresh(updatedShop);
 
@@ -1671,6 +1662,22 @@ app.get('/api/shops/sync-status', auth, async (req, res) => {
       };
     }
 
+    // Check if there's an ongoing sync (status = 'started')
+    const ongoingSyncResult = await pool.query(
+      `SELECT "id", "mode", "startedAt"
+       FROM "SyncLog"
+       WHERE "shopId" = $1 AND "status" = 'started'
+       ORDER BY "startedAt" DESC
+       LIMIT 1`,
+      [shop.id]
+    );
+    const isSyncing = ongoingSyncResult.rows.length > 0;
+    const ongoingSync = isSyncing ? {
+      id: ongoingSyncResult.rows[0].id,
+      mode: ongoingSyncResult.rows[0].mode,
+      startedAt: ongoingSyncResult.rows[0].startedAt
+    } : null;
+
     const responseData = {
       success: true,
       syncStatus: {
@@ -1679,12 +1686,15 @@ app.get('/api/shops/sync-status', auth, async (req, res) => {
         productCount: parseInt(productCount.rows[0].count),
         recommendationCount: parseInt(recCount.rows[0].count),
         plan: shop.plan || 'free',
+        // 同步状态
+        isSyncing: isSyncing,
+        ongoingSync: ongoingSync,
         // 刷新限制信息
         refreshLimit: {
           limit: refreshStatus.limit,
           used: refreshStatus.used,
           remaining: refreshStatus.remaining,
-          canRefresh: refreshStatus.allowed,
+          canRefresh: refreshStatus.allowed && !isSyncing, // 如果正在同步，不能再次刷新
           nextRefreshAt: refreshStatus.nextRefreshAt
         },
         // API usage
