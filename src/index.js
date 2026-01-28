@@ -1388,7 +1388,10 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
     if (actualMode === 'initial') {
       updateFields.initialSyncDone = true;
       updateFields.lastRefreshAt = new Date();
-      console.log('[SYNC] Setting initialSyncDone = true');
+      // Initial sync counts as 1 refresh
+      updateFields.refreshCount = 1;
+      updateFields.refreshMonth = currentCycle;
+      console.log('[SYNC] Setting initialSyncDone = true, refreshCount = 1');
     } else if (actualMode === 'refresh') {
       updateFields.lastRefreshAt = new Date();
 
