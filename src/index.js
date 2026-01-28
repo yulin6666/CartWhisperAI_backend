@@ -2081,7 +2081,7 @@ app.put('/api/shops/:domain/plan', async (req, res) => {
     await client.query('BEGIN');
 
     const domain = req.params.domain.replace(/^https?:\/\//, '').replace(/\/$/, '');
-    const { plan, shopifySubscriptionId, billingStatus, lastRefreshAt } = req.body;
+    const { plan, shopifySubscriptionId, billingStatus, lastRefreshAt, subscriptionStartedAt, subscriptionEndsAt } = req.body;
 
     // Get current shop data to check if plan is changing
     const currentShop = await client.query('SELECT * FROM "Shop" WHERE "domain" = $1', [domain]);
@@ -2113,6 +2113,14 @@ app.put('/api/shops/:domain/plan', async (req, res) => {
     if (lastRefreshAt !== undefined) {
       updates.push(`"lastRefreshAt" = $${paramIndex++}`);
       values.push(lastRefreshAt);
+    }
+    if (subscriptionStartedAt !== undefined) {
+      updates.push(`"subscriptionStartedAt" = $${paramIndex++}`);
+      values.push(subscriptionStartedAt);
+    }
+    if (subscriptionEndsAt !== undefined) {
+      updates.push(`"subscriptionEndsAt" = $${paramIndex++}`);
+      values.push(subscriptionEndsAt);
     }
     if (req.body.apiCallsToday !== undefined) {
       updates.push(`"apiCallsToday" = $${paramIndex++}`);
