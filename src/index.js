@@ -1144,6 +1144,25 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
     // 开始事务
     await client.query('BEGIN');
 
+    // 🔒 检查是否已有正在进行的同步（防止重复提交）
+    const ongoingSyncCheck = await client.query(
+      `SELECT "id" FROM "SyncLog"
+       WHERE "shopId" = $1 AND "status" = 'started'
+       LIMIT 1`,
+      [shopId]
+    );
+
+    if (ongoingSyncCheck.rows.length > 0) {
+      console.error(`[SYNC] ❌ ERROR: Sync already in progress for shop ${shop.domain}`);
+      await monitor.fail(new Error('Sync already in progress'));
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        error: 'A sync operation is already in progress. Please wait for it to complete.',
+        code: 'SYNC_IN_PROGRESS',
+        isSyncing: true
+      });
+    }
+
     // 检查商店是否被禁用同步
     if (shop.isSyncEnabled === false) {
       console.error(`[SYNC] ❌ ERROR: Sync is disabled for shop ${shop.domain}`);
