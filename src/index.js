@@ -2777,6 +2777,122 @@ app.put('/api/admin/shops/:shopId/sync-permission', async (req, res) => {
   }
 });
 
+// ============ 商店同步管理 API ============
+
+// 手动设置商品数
+app.put('/api/admin/shops/:shopId/product-count', async (req, res) => {
+  try {
+    const { shopId } = req.params;
+    const { productCount } = req.body;
+
+    if (typeof productCount !== 'number' || productCount < 0) {
+      return res.status(400).json({ error: 'productCount must be a non-negative number' });
+    }
+
+    const result = await pool.query(
+      `UPDATE "Shop" SET "productCount" = $1, "updatedAt" = NOW() WHERE "id" = $2 RETURNING *`,
+      [productCount, shopId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Shop not found' });
+    }
+
+    const shop = result.rows[0];
+    console.log(`[Admin] Set product count for ${shop.domain}: ${productCount}`);
+
+    res.json({
+      success: true,
+      shop: result.rows[0],
+      message: `Product count set to ${productCount}`
+    });
+  } catch (e) {
+    console.error('[Admin] Error setting product count:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 重置同步状态
+app.post('/api/admin/shops/:shopId/reset-sync', async (req, res) => {
+  try {
+    const { shopId } = req.params;
+
+    const result = await pool.query(
+      `UPDATE "Shop"
+       SET "productCount" = 0,
+           "initialSyncDone" = false,
+           "lastRefreshAt" = NULL,
+           "updatedAt" = NOW()
+       WHERE "id" = $1
+       RETURNING *`,
+      [shopId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Shop not found' });
+    }
+
+    const shop = result.rows[0];
+    console.log(`[Admin] Reset sync status for ${shop.domain}`);
+
+    res.json({
+      success: true,
+      shop: result.rows[0],
+      message: 'Sync status reset successfully'
+    });
+  } catch (e) {
+    console.error('[Admin] Error resetting sync status:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 触发重新同步
+app.post('/api/admin/shops/:shopId/trigger-sync', async (req, res) => {
+  try {
+    const { shopId } = req.params;
+
+    // 获取商店信息
+    const shopResult = await pool.query(
+      `SELECT * FROM "Shop" WHERE "id" = $1`,
+      [shopId]
+    );
+
+    if (shopResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Shop not found' });
+    }
+
+    const shop = shopResult.rows[0];
+
+    // 检查同步权限
+    if (shop.isSyncEnabled === false) {
+      return res.status(403).json({
+        error: 'Sync is disabled for this shop',
+        message: 'Please enable sync permission first'
+      });
+    }
+
+    // 重置同步状态，让前端可以重新同步
+    await pool.query(
+      `UPDATE "Shop"
+       SET "initialSyncDone" = false,
+           "updatedAt" = NOW()
+       WHERE "id" = $1`,
+      [shopId]
+    );
+
+    console.log(`[Admin] Triggered sync for ${shop.domain}`);
+
+    res.json({
+      success: true,
+      shop: shop,
+      message: `Sync triggered for ${shop.domain}. The shop owner needs to visit the app to complete the sync.`
+    });
+  } catch (e) {
+    console.error('[Admin] Error triggering sync:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ============ Start ============
 initDatabase().then(() => {
   const server = app.listen(PORT, () => {

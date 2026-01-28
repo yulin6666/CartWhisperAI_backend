@@ -1097,33 +1097,118 @@
         return;
       }
 
+      // 计划限制映射
+      const planLimits = {
+        'free': 50,
+        'pro': 2000,
+        'max': Infinity
+      };
+
       const html = `
-        <div class="shop-list">
-          ${shops.map(shop => `
-            <div class="shop-card">
-              <h4>${shop.domain}</h4>
-              <div class="info">
-                <span>计划:</span>
-                <span><strong>${shop.plan.toUpperCase()}</strong></span>
-              </div>
-              <div class="info">
-                <span>商品数:</span>
-                <span>${shop.productCount || 0}</span>
-              </div>
-              <div class="info">
-                <span>首次同步:</span>
-                <span>${shop.initialSyncDone ? '✅ 已完成' : '⏳ 未完成'}</span>
-              </div>
-              <div class="info">
-                <span>上次刷新:</span>
-                <span>${shop.lastRefreshAt ? formatDate(shop.lastRefreshAt) : '-'}</span>
-              </div>
-              <div class="info">
-                <span>创建时间:</span>
-                <span>${formatDate(shop.createdAt)}</span>
-              </div>
-            </div>
-          `).join('')}
+        <div style="margin-bottom: 20px;">
+          <h2 style="color: #333; margin-bottom: 15px;">🏪 商店同步管理</h2>
+          <p style="color: #666; margin-bottom: 20px;">
+            查看和管理所有商店的产品同步状态，可以重置同步数据或手动设置商品数量。
+          </p>
+        </div>
+
+        <div class="table-container">
+          <table>
+            <thead>
+              <tr>
+                <th>商店域名</th>
+                <th>计划</th>
+                <th>同步商品数</th>
+                <th>同步进度</th>
+                <th>同步状态</th>
+                <th>上次刷新</th>
+                <th>创建时间</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${shops.map(shop => {
+                const plan = (shop.plan || 'free').toLowerCase();
+                const maxProducts = planLimits[plan] || 50;
+                const productCount = shop.productCount || 0;
+                const percentage = maxProducts === Infinity ? 0 : Math.min(100, (productCount / maxProducts * 100).toFixed(1));
+                const initialSyncDone = shop.initialSyncDone;
+
+                return `
+                  <tr>
+                    <td>
+                      <strong>${shop.domain}</strong><br>
+                      <small style="color: #999; font-family: monospace;">${shop.id}</small>
+                    </td>
+                    <td>
+                      <span class="badge badge-${plan === 'free' ? 'info' : plan === 'pro' ? 'warning' : 'success'}">
+                        ${shop.plan.toUpperCase()}
+                      </span>
+                    </td>
+                    <td style="font-weight: bold; color: ${productCount === 0 ? '#dc3545' : '#333'};">
+                      ${productCount} / ${maxProducts === Infinity ? '∞' : maxProducts}
+                    </td>
+                    <td>
+                      ${maxProducts === Infinity ? '<span style="color: #999;">无限制</span>' : `
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                          <div style="flex: 1; height: 8px; background: #e9ecef; border-radius: 4px; overflow: hidden;">
+                            <div style="height: 100%; width: ${percentage}%; background: ${percentage >= 100 ? '#dc3545' : percentage > 80 ? '#ffc107' : '#28a745'}; transition: width 0.3s;"></div>
+                          </div>
+                          <span style="font-size: 12px; font-weight: bold; min-width: 50px;">${percentage}%</span>
+                        </div>
+                      `}
+                    </td>
+                    <td>
+                      <span class="badge ${initialSyncDone ? 'badge-success' : 'badge-warning'}">
+                        ${initialSyncDone ? '✅ 已完成' : '⏳ 未完成'}
+                      </span>
+                    </td>
+                    <td style="font-size: 12px; color: #666;">
+                      ${shop.lastRefreshAt ? formatDate(shop.lastRefreshAt) : '-'}
+                    </td>
+                    <td style="font-size: 12px; color: #666;">
+                      ${formatDate(shop.createdAt)}
+                    </td>
+                    <td>
+                      <div style="display: flex; gap: 5px; flex-wrap: wrap;">
+                        <button
+                          onclick="setProductCount('${shop.id}', '${shop.domain}', ${productCount})"
+                          style="padding: 4px 8px; font-size: 11px; background: #3b82f6; color: white; border: none; border-radius: 4px; cursor: pointer;"
+                          title="手动设置商品数"
+                        >
+                          ✏️ 设置
+                        </button>
+                        <button
+                          onclick="resetSyncStatus('${shop.id}', '${shop.domain}')"
+                          style="padding: 4px 8px; font-size: 11px; background: #f59e0b; color: white; border: none; border-radius: 4px; cursor: pointer;"
+                          title="重置同步状态"
+                        >
+                          🔄 重置
+                        </button>
+                        <button
+                          onclick="triggerResync('${shop.id}', '${shop.domain}')"
+                          style="padding: 4px 8px; font-size: 11px; background: #10b981; color: white; border: none; border-radius: 4px; cursor: pointer;"
+                          title="触发重新同步"
+                        >
+                          🔃 同步
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                `;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>
+
+        <div style="margin-top: 20px; padding: 15px; background: #e3f2fd; border-radius: 8px; border: 1px solid #90caf9;">
+          <h4 style="margin: 0 0 10px 0; color: #1565c0;">💡 功能说明</h4>
+          <ul style="margin: 0; padding-left: 20px; color: #1565c0; line-height: 1.8;">
+            <li><strong>设置:</strong> 手动修改商店的商品数量（productCount）</li>
+            <li><strong>重置:</strong> 将商品数重置为0，同步状态设为未完成</li>
+            <li><strong>同步:</strong> 触发该商店的重新同步操作（需要后端支持）</li>
+            <li><strong>同步进度:</strong> 显示当前商品数占计划限制的百分比</li>
+          </ul>
         </div>
       `;
 
@@ -2094,6 +2179,118 @@
       } catch (error) {
         console.error('Failed to clear recommendations:', error);
         alert(`清空失败: ${error.message}`);
+      }
+    }
+
+    // 手动设置商品数
+    async function setProductCount(shopId, domain, currentCount) {
+      const newCount = prompt(`设置商店的商品数量\n\n商店: ${domain}\n当前商品数: ${currentCount}\n\n请输入新的商品数量:`, currentCount);
+
+      if (newCount === null) {
+        return; // 用户取消
+      }
+
+      const count = parseInt(newCount);
+      if (isNaN(count) || count < 0) {
+        alert('请输入有效的商品数量（≥0）');
+        return;
+      }
+
+      if (!confirm(`确定要设置商品数量吗？\n\n商店: ${domain}\n新商品数: ${count}`)) {
+        return;
+      }
+
+      try {
+        const response = await fetch(`${API_BASE}/api/admin/shops/${shopId}/product-count`, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ productCount: count })
+        });
+
+        if (!response.ok) {
+          const error = await response.json().catch(() => ({ error: 'Unknown error' }));
+          throw new Error(error.error || `HTTP ${response.status}`);
+        }
+
+        const result = await response.json();
+        console.log('Product count updated:', result);
+
+        alert(`成功设置商品数量！\n\n商店: ${domain}\n新商品数: ${count}`);
+
+        // 重新加载商店列表
+        await loadShops();
+        await loadShopsList();
+      } catch (error) {
+        console.error('Failed to set product count:', error);
+        alert(`设置失败: ${error.message}`);
+      }
+    }
+
+    // 重置同步状态
+    async function resetSyncStatus(shopId, domain) {
+      if (!confirm(`确定要重置同步状态吗？\n\n商店: ${domain}\n\n将会执行：\n• 商品数重置为 0\n• 同步状态设为"未完成"\n• 清空上次刷新时间`)) {
+        return;
+      }
+
+      try {
+        const response = await fetch(`${API_BASE}/api/admin/shops/${shopId}/reset-sync`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          }
+        });
+
+        if (!response.ok) {
+          const error = await response.json().catch(() => ({ error: 'Unknown error' }));
+          throw new Error(error.error || `HTTP ${response.status}`);
+        }
+
+        const result = await response.json();
+        console.log('Sync status reset:', result);
+
+        alert(`成功重置同步状态！\n\n商店: ${domain}\n商品数: 0\n同步状态: 未完成`);
+
+        // 重新加载商店列表
+        await loadShops();
+        await loadShopsList();
+      } catch (error) {
+        console.error('Failed to reset sync status:', error);
+        alert(`重置失败: ${error.message}`);
+      }
+    }
+
+    // 触发重新同步
+    async function triggerResync(shopId, domain) {
+      if (!confirm(`确定要触发重新同步吗？\n\n商店: ${domain}\n\n这将通知后端重新同步该商店的产品数据。`)) {
+        return;
+      }
+
+      try {
+        const response = await fetch(`${API_BASE}/api/admin/shops/${shopId}/trigger-sync`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          }
+        });
+
+        if (!response.ok) {
+          const error = await response.json().catch(() => ({ error: 'Unknown error' }));
+          throw new Error(error.error || `HTTP ${response.status}`);
+        }
+
+        const result = await response.json();
+        console.log('Sync triggered:', result);
+
+        alert(`成功触发同步！\n\n商店: ${domain}\n${result.message || '同步请求已发送'}`);
+
+        // 重新加载商店列表
+        await loadShops();
+        await loadShopsList();
+      } catch (error) {
+        console.error('Failed to trigger sync:', error);
+        alert(`触发同步失败: ${error.message}`);
       }
     }
 
