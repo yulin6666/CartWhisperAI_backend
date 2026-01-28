@@ -1233,7 +1233,7 @@
           <h4 style="margin: 0 0 10px 0; color: #1565c0;">💡 功能说明</h4>
           <ul style="margin: 0; padding-left: 20px; color: #1565c0; line-height: 1.8;">
             <li><strong>设置:</strong> 手动修改商店的商品数量（productCount）</li>
-            <li><strong>重置:</strong> 将商品数重置为0，同步状态设为未完成</li>
+            <li><strong>重置:</strong> ⚠️ 完全清空该商店的所有数据，包括：删除数据库中所有商品（Product表）、删除所有推荐（Recommendation表）、商品数重置为0、同步状态设为未完成。<strong style="color: #d32f2f;">此操作不可恢复！</strong></li>
             <li><strong>同步:</strong> 触发该商店的重新同步操作（需要后端支持）</li>
             <li><strong>同步进度:</strong> 显示当前商品数占计划限制的百分比</li>
           </ul>
@@ -2258,7 +2258,7 @@
 
     // 重置同步状态
     async function resetSyncStatus(shopId, domain) {
-      if (!confirm(`确定要重置同步状态吗？\n\n商店: ${domain}\n\n将会执行：\n• 商品数重置为 0\n• 同步状态设为"未完成"\n• 清空上次刷新时间`)) {
+      if (!confirm(`⚠️ 确定要重置同步状态并删除所有数据吗？\n\n商店: ${domain}\n\n将会执行：\n• 删除所有商品数据（Product表）\n• 删除所有推荐数据（Recommendation表）\n• 商品数重置为 0\n• 同步状态设为"未完成"\n• 清空上次刷新时间\n\n⚠️ 此操作不可恢复！`)) {
         return;
       }
 
@@ -2278,7 +2278,7 @@
         const result = await response.json();
         console.log('Sync status reset:', result);
 
-        alert(`成功重置同步状态！\n\n商店: ${domain}\n商品数: 0\n同步状态: 未完成`);
+        alert(`✅ 成功重置同步状态！\n\n商店: ${domain}\n删除了 ${result.deletedProducts || 0} 个商品\n删除了 ${result.deletedRecommendations || 0} 条推荐\n\n商品数: 0\n同步状态: 未完成`);
 
         // 重新加载商店列表
         await loadShops();

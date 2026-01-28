@@ -2895,11 +2895,43 @@ app.put('/api/admin/shops/:shopId/product-count', async (req, res) => {
   }
 });
 
-// 重置同步状态
+// 重置同步状态（删除商品和推荐数据）
 app.post('/api/admin/shops/:shopId/reset-sync', async (req, res) => {
   try {
     const { shopId } = req.params;
 
+    // 首先获取shop信息，确认shop存在
+    const shopCheck = await pool.query(
+      `SELECT * FROM "Shop" WHERE "id" = $1`,
+      [shopId]
+    );
+
+    if (shopCheck.rows.length === 0) {
+      return res.status(404).json({ error: 'Shop not found' });
+    }
+
+    const shop = shopCheck.rows[0];
+    console.log(`[Admin] Resetting sync status for ${shop.domain}...`);
+
+    // 1. 删除该商店的所有推荐数据
+    const deleteRecommendationsResult = await pool.query(
+      `DELETE FROM "Recommendation"
+       WHERE "shopId" = $1`,
+      [shopId]
+    );
+    const deletedRecommendations = deleteRecommendationsResult.rowCount;
+    console.log(`[Admin] Deleted ${deletedRecommendations} recommendations for ${shop.domain}`);
+
+    // 2. 删除该商店的所有商品数据
+    const deleteProductsResult = await pool.query(
+      `DELETE FROM "Product"
+       WHERE "shopId" = $1`,
+      [shopId]
+    );
+    const deletedProducts = deleteProductsResult.rowCount;
+    console.log(`[Admin] Deleted ${deletedProducts} products for ${shop.domain}`);
+
+    // 3. 重置Shop表的状态字段
     const result = await pool.query(
       `UPDATE "Shop"
        SET "productCount" = 0,
@@ -2911,17 +2943,15 @@ app.post('/api/admin/shops/:shopId/reset-sync', async (req, res) => {
       [shopId]
     );
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Shop not found' });
-    }
-
-    const shop = result.rows[0];
-    console.log(`[Admin] Reset sync status for ${shop.domain}`);
+    const updatedShop = result.rows[0];
+    console.log(`[Admin] Reset sync status completed for ${shop.domain}`);
 
     res.json({
       success: true,
-      shop: result.rows[0],
-      message: 'Sync status reset successfully'
+      shop: updatedShop,
+      deletedProducts,
+      deletedRecommendations,
+      message: `Successfully reset sync status. Deleted ${deletedProducts} products and ${deletedRecommendations} recommendations.`
     });
   } catch (e) {
     console.error('[Admin] Error resetting sync status:', e);
