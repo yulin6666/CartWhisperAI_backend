@@ -1121,6 +1121,7 @@
                 <th>同步商品数</th>
                 <th>同步进度</th>
                 <th>同步状态</th>
+                <th>会员到期</th>
                 <th>上次刷新</th>
                 <th>创建时间</th>
                 <th>操作</th>
@@ -1133,6 +1134,30 @@
                 const productCount = shop.productCount || 0;
                 const percentage = maxProducts === Infinity ? 0 : Math.min(100, (productCount / maxProducts * 100).toFixed(1));
                 const initialSyncDone = shop.initialSyncDone;
+
+                // 计算会员到期时间
+                let subscriptionExpiry = '-';
+                let expiryColor = '#999';
+                if (shop.subscriptionEndsAt) {
+                  const expiryDate = new Date(shop.subscriptionEndsAt);
+                  const now = new Date();
+                  const daysRemaining = Math.ceil((expiryDate - now) / (1000 * 60 * 60 * 24));
+
+                  subscriptionExpiry = formatDate(shop.subscriptionEndsAt);
+
+                  if (daysRemaining < 0) {
+                    expiryColor = '#dc3545'; // 已过期 - 红色
+                    subscriptionExpiry += '<br><small style="color: #dc3545; font-weight: bold;">已过期</small>';
+                  } else if (daysRemaining <= 7) {
+                    expiryColor = '#ffc107'; // 即将过期 - 黄色
+                    subscriptionExpiry += `<br><small style="color: #ffc107; font-weight: bold;">${daysRemaining}天后到期</small>`;
+                  } else {
+                    expiryColor = '#28a745'; // 正常 - 绿色
+                    subscriptionExpiry += `<br><small style="color: #28a745;">${daysRemaining}天后到期</small>`;
+                  }
+                } else if (plan !== 'free') {
+                  subscriptionExpiry = '<small style="color: #999;">未设置</small>';
+                }
 
                 return `
                   <tr>
@@ -1162,6 +1187,9 @@
                       <span class="badge ${initialSyncDone ? 'badge-success' : 'badge-warning'}">
                         ${initialSyncDone ? '✅ 已完成' : '⏳ 未完成'}
                       </span>
+                    </td>
+                    <td style="font-size: 12px; color: ${expiryColor};">
+                      ${subscriptionExpiry}
                     </td>
                     <td style="font-size: 12px; color: #666;">
                       ${shop.lastRefreshAt ? formatDate(shop.lastRefreshAt) : '-'}

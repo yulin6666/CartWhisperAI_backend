@@ -1040,29 +1040,61 @@ function canRefresh(shop) {
   };
 
   const limit = REFRESH_LIMITS[plan] || REFRESH_LIMITS.free;
-  const currentMonth = new Date().toISOString().slice(0, 7); // YYYY-MM
 
-  // 检查是否是新的月份，重置计数
+  // 使用订阅开始时间计算周期，而不是自然月
+  const now = new Date();
+  let currentCycle = null;
+
+  if (shop.subscriptionStartedAt) {
+    // 基于订阅开始日期计算当前周期
+    const startDate = new Date(shop.subscriptionStartedAt);
+    const dayOfMonth = startDate.getDate();
+
+    // 计算当前周期的开始日期
+    const cycleStart = new Date(now.getFullYear(), now.getMonth(), dayOfMonth);
+    if (cycleStart > now) {
+      // 如果本月的周期开始日期还没到，使用上个月的
+      cycleStart.setMonth(cycleStart.getMonth() - 1);
+    }
+
+    currentCycle = cycleStart.toISOString().slice(0, 10); // YYYY-MM-DD
+  } else {
+    // 如果没有订阅开始时间，回退到自然月逻辑
+    currentCycle = now.toISOString().slice(0, 7); // YYYY-MM
+  }
+
+  // 检查是否是新的周期，重置计数
   let refreshCount = shop.refreshCount || 0;
-  const lastMonth = shop.refreshMonth;
+  const lastCycle = shop.refreshMonth;
 
-  if (lastMonth !== currentMonth) {
-    // 新的月份，重置计数
+  if (lastCycle !== currentCycle) {
+    // 新的周期，重置计数
     refreshCount = 0;
   }
 
   // 检查是否超过限额
   if (refreshCount >= limit) {
-    // 计算下次可刷新时间（下个月1号）
-    const nextMonth = new Date(currentMonth + '-01');
-    nextMonth.setMonth(nextMonth.getMonth() + 1);
+    // 计算下次可刷新时间（下个周期开始日期）
+    let nextCycleStart;
+    if (shop.subscriptionStartedAt) {
+      const startDate = new Date(shop.subscriptionStartedAt);
+      const dayOfMonth = startDate.getDate();
+      nextCycleStart = new Date(now.getFullYear(), now.getMonth(), dayOfMonth);
+      if (nextCycleStart <= now) {
+        nextCycleStart.setMonth(nextCycleStart.getMonth() + 1);
+      }
+    } else {
+      // 回退到自然月逻辑
+      nextCycleStart = new Date(currentCycle + '-01');
+      nextCycleStart.setMonth(nextCycleStart.getMonth() + 1);
+    }
 
     return {
       allowed: false,
       limit,
       used: refreshCount,
       remaining: 0,
-      nextRefreshAt: nextMonth.toISOString(),
+      nextRefreshAt: nextCycleStart.toISOString(),
       plan
     };
   }
@@ -1331,7 +1363,27 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
       updatedAt: new Date()
     };
 
-    const currentMonth = new Date().toISOString().slice(0, 7); // YYYY-MM
+    // 计算当前周期（基于订阅开始时间）
+    const now = new Date();
+    let currentCycle = null;
+
+    if (shop.subscriptionStartedAt) {
+      // 基于订阅开始日期计算当前周期
+      const startDate = new Date(shop.subscriptionStartedAt);
+      const dayOfMonth = startDate.getDate();
+
+      // 计算当前周期的开始日期
+      const cycleStart = new Date(now.getFullYear(), now.getMonth(), dayOfMonth);
+      if (cycleStart > now) {
+        // 如果本月的周期开始日期还没到，使用上个月的
+        cycleStart.setMonth(cycleStart.getMonth() - 1);
+      }
+
+      currentCycle = cycleStart.toISOString().slice(0, 10); // YYYY-MM-DD
+    } else {
+      // 如果没有订阅开始时间，回退到自然月逻辑
+      currentCycle = now.toISOString().slice(0, 7); // YYYY-MM
+    }
 
     if (actualMode === 'initial') {
       updateFields.initialSyncDone = true;
@@ -1350,18 +1402,18 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
 
       if (shopRefreshResult.rows.length > 0) {
         const currentShop = shopRefreshResult.rows[0];
-        const lastMonth = currentShop.refreshMonth;
+        const lastCycle = currentShop.refreshMonth;
 
-        if (lastMonth !== currentMonth) {
-          // 新月份，重置为1
+        if (lastCycle !== currentCycle) {
+          // 新周期，重置为1
           updateFields.refreshCount = 1;
-          updateFields.refreshMonth = currentMonth;
+          updateFields.refreshMonth = currentCycle;
         } else {
-          // 同一月份，增加计数
+          // 同一周期，增加计数
           updateFields.refreshCount = (currentShop.refreshCount || 0) + 1;
-          updateFields.refreshMonth = currentMonth;
+          updateFields.refreshMonth = currentCycle;
         }
-        console.log(`[SYNC] Updating refresh count: ${updateFields.refreshCount}`);
+        console.log(`[SYNC] Updating refresh count: ${updateFields.refreshCount} (cycle: ${currentCycle})`);
       }
     }
 
@@ -2031,6 +2083,16 @@ app.put('/api/shops/:domain/plan', async (req, res) => {
     const domain = req.params.domain.replace(/^https?:\/\//, '').replace(/\/$/, '');
     const { plan, shopifySubscriptionId, billingStatus, lastRefreshAt } = req.body;
 
+    // Get current shop data to check if plan is changing
+    const currentShop = await client.query('SELECT * FROM "Shop" WHERE "domain" = $1', [domain]);
+    if (currentShop.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Shop not found' });
+    }
+
+    const oldPlan = currentShop.rows[0].plan || 'free';
+    const newPlan = plan || oldPlan;
+
     // Build dynamic update query
     const updates = [];
     const values = [];
@@ -2055,6 +2117,13 @@ app.put('/api/shops/:domain/plan', async (req, res) => {
     if (req.body.apiCallsToday !== undefined) {
       updates.push(`"apiCallsToday" = $${paramIndex++}`);
       values.push(req.body.apiCallsToday);
+    }
+
+    // If plan is being upgraded (free -> pro/max), reset refresh count
+    if (plan !== undefined && oldPlan === 'free' && (newPlan === 'pro' || newPlan === 'max')) {
+      updates.push(`"refreshCount" = 0`);
+      updates.push(`"refreshMonth" = NULL`);
+      console.log(`[Plan] Resetting refresh count for upgrade from ${oldPlan} to ${newPlan}`);
     }
 
     if (updates.length === 0) {
@@ -2547,7 +2616,7 @@ app.get('/api/monitoring/stats', async (req, res) => {
 app.get('/api/monitoring/shops', async (req, res) => {
   try {
     const result = await pool.query(`
-      SELECT "id", domain, plan, "apiKey", "productCount", "initialSyncDone", "lastRefreshAt", "createdAt"
+      SELECT "id", domain, plan, "apiKey", "productCount", "initialSyncDone", "lastRefreshAt", "subscriptionEndsAt", "createdAt"
       FROM "Shop"
       ORDER BY "createdAt" DESC
     `);
