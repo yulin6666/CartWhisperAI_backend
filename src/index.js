@@ -1034,8 +1034,8 @@ function canRefresh(shop) {
 
   // 月度刷新次数限制
   const REFRESH_LIMITS = {
-    free: 0,   // 0次/月（不允许）
-    pro: 3,    // 3次/月
+    free: 1,   // 1次/月（初始同步）
+    pro: 3,    // 3次/月（初始同步 + 2次额外）
     max: 10    // 10次/月
   };
 
