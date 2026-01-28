@@ -2092,6 +2092,7 @@ app.put('/api/shops/:domain/plan', async (req, res) => {
 
     const oldPlan = currentShop.rows[0].plan || 'free';
     const newPlan = plan || oldPlan;
+    const shopId = currentShop.rows[0].id;
 
     // Build dynamic update query
     const updates = [];
@@ -2151,6 +2152,11 @@ app.put('/api/shops/:domain/plan', async (req, res) => {
     }
 
     await client.query('COMMIT');
+
+    // 清除缓存
+    const cacheKey = `sync-status:${shopId}`;
+    cache.delete(cacheKey);
+    console.log(`[Plan] Cleared cache for ${cacheKey}`);
 
     console.log(`[Plan] Updated ${domain}: ${JSON.stringify(req.body)}`);
     res.json({
