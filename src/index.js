@@ -1144,25 +1144,6 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
     // 开始事务
     await client.query('BEGIN');
 
-    // 🔒 检查是否已有正在进行的同步（防止重复提交）
-    const ongoingSyncCheck = await client.query(
-      `SELECT "id" FROM "SyncLog"
-       WHERE "shopId" = $1 AND "status" = 'started'
-       LIMIT 1`,
-      [shopId]
-    );
-
-    if (ongoingSyncCheck.rows.length > 0) {
-      console.error(`[SYNC] ❌ ERROR: Sync already in progress for shop ${shop.domain}`);
-      await monitor.fail(new Error('Sync already in progress'));
-      await client.query('ROLLBACK');
-      return res.status(409).json({
-        error: 'A sync operation is already in progress. Please wait for it to complete.',
-        code: 'SYNC_IN_PROGRESS',
-        isSyncing: true
-      });
-    }
-
     // 检查商店是否被禁用同步
     if (shop.isSyncEnabled === false) {
       console.error(`[SYNC] ❌ ERROR: Sync is disabled for shop ${shop.domain}`);
@@ -1261,16 +1242,6 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
             plan
           });
         }
-
-        // ✅ 立即更新refreshCount，防止用户重复点击
-        console.log(`[SYNC] 🔒 Immediately updating refreshCount: ${refreshCount} -> ${refreshCount + 1}`);
-        await client.query(`
-          UPDATE "Shop"
-          SET "refreshCount" = $1,
-              "refreshMonth" = $2
-          WHERE "id" = $3
-        `, [refreshCount + 1, currentMonth, shopId]);
-        console.log(`[SYNC] ✅ RefreshCount updated immediately to prevent duplicate clicks`);
       }
     }
 
@@ -1420,8 +1391,30 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
       console.log('[SYNC] Setting initialSyncDone = true');
     } else if (actualMode === 'refresh') {
       updateFields.lastRefreshAt = new Date();
-      // refreshCount 已经在前面立即更新了，这里不再重复更新
-      console.log('[SYNC] Setting lastRefreshAt (refreshCount already updated earlier)');
+
+      // 使用行级锁重新获取最新的刷新计数（防止竞态条件）
+      const shopRefreshResult = await client.query(`
+        SELECT "refreshCount", "refreshMonth"
+        FROM "Shop"
+        WHERE "id" = $1
+        FOR UPDATE
+      `, [shopId]);
+
+      if (shopRefreshResult.rows.length > 0) {
+        const currentShop = shopRefreshResult.rows[0];
+        const lastCycle = currentShop.refreshMonth;
+
+        if (lastCycle !== currentCycle) {
+          // 新周期，重置为1
+          updateFields.refreshCount = 1;
+          updateFields.refreshMonth = currentCycle;
+        } else {
+          // 同一周期，增加计数
+          updateFields.refreshCount = (currentShop.refreshCount || 0) + 1;
+          updateFields.refreshMonth = currentCycle;
+        }
+        console.log(`[SYNC] Updating refresh count: ${updateFields.refreshCount} (cycle: ${currentCycle})`);
+      }
     }
 
     await client.query(`
@@ -1429,13 +1422,17 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
         "productCount" = $1,
         "updatedAt" = $2,
         "initialSyncDone" = COALESCE($3, "initialSyncDone"),
-        "lastRefreshAt" = COALESCE($4, "lastRefreshAt")
-      WHERE "id" = $5
+        "lastRefreshAt" = COALESCE($4, "lastRefreshAt"),
+        "refreshCount" = COALESCE($5, "refreshCount"),
+        "refreshMonth" = COALESCE($6, "refreshMonth")
+      WHERE "id" = $7
     `, [
       updateFields.productCount,
       updateFields.updatedAt,
       updateFields.initialSyncDone || null,
       updateFields.lastRefreshAt || null,
+      updateFields.refreshCount !== undefined ? updateFields.refreshCount : null,
+      updateFields.refreshMonth || null,
       shopId
     ]);
 
@@ -1463,18 +1460,11 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
     }
 
     // Calculate next refresh time with updated shop data
-    // 从数据库重新查询最新的refreshCount（因为它在前面已经立即更新了）
-    const latestShopResult = await client.query(
-      `SELECT "refreshCount", "refreshMonth" FROM "Shop" WHERE "id" = $1`,
-      [shopId]
-    );
-    const latestShop = latestShopResult.rows[0];
-
     const updatedShop = {
       ...shop,
       lastRefreshAt: updateFields.lastRefreshAt || shop.lastRefreshAt,
-      refreshCount: latestShop.refreshCount,
-      refreshMonth: latestShop.refreshMonth
+      refreshCount: updateFields.refreshCount !== undefined ? updateFields.refreshCount : shop.refreshCount,
+      refreshMonth: updateFields.refreshMonth || shop.refreshMonth
     };
     const refreshCheck = canRefresh(updatedShop);
 
