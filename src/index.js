@@ -1392,7 +1392,8 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
       updateFields.refreshCount = 1;
       updateFields.refreshMonth = currentCycle;
       console.log('[SYNC] Setting initialSyncDone = true, refreshCount = 1');
-    } else if (actualMode === 'refresh') {
+    } else if (actualMode === 'refresh' || actualMode === 'incremental') {
+      // 🔥 incremental模式也要更新refreshCount（用户手动点击同步按钮）
       updateFields.lastRefreshAt = new Date();
 
       // 使用行级锁重新获取最新的刷新计数（防止竞态条件）
@@ -1416,7 +1417,7 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
           updateFields.refreshCount = (currentShop.refreshCount || 0) + 1;
           updateFields.refreshMonth = currentCycle;
         }
-        console.log(`[SYNC] Updating refresh count: ${updateFields.refreshCount} (cycle: ${currentCycle})`);
+        console.log(`[SYNC] Updating refresh count: ${updateFields.refreshCount} (cycle: ${currentCycle}, mode: ${actualMode})`);
       }
     }
 
