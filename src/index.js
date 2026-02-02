@@ -1488,6 +1488,11 @@ app.post('/api/products/sync', syncLimiter, auth, async (req, res) => {
     await client.query('COMMIT');
     console.log('[SYNC] ✅ Transaction committed successfully');
 
+    // 清除sync-status缓存（重要！确保前端获取最新的refreshCount）
+    const syncStatusCacheKey = `sync-status:${shopId}`;
+    cache.delete(syncStatusCacheKey);
+    console.log(`[SYNC] Cleared sync-status cache: ${syncStatusCacheKey}`);
+
     // 立即释放数据库连接
     client.release();
     console.log('[SYNC] 🔓 Database connection released');
@@ -2150,11 +2155,18 @@ app.put('/api/shops/:domain/plan', async (req, res) => {
       values.push(req.body.apiCallsToday);
     }
 
-    // If plan is being upgraded (free -> pro/max), reset refresh count
+    // If plan is being upgraded (free -> pro/max), reset refresh count ONLY if initial sync not done
+    // This gives upgraded users a fresh start with their new plan's refresh allowance
     if (plan !== undefined && oldPlan === 'free' && (newPlan === 'pro' || newPlan === 'max')) {
-      updates.push(`"refreshCount" = 0`);
-      updates.push(`"refreshMonth" = NULL`);
-      console.log(`[Plan] Resetting refresh count for upgrade from ${oldPlan} to ${newPlan}`);
+      const currentShopData = currentShop.rows[0];
+      // Only reset if they haven't done initial sync yet
+      if (!currentShopData.initialSyncDone) {
+        updates.push(`"refreshCount" = 0`);
+        updates.push(`"refreshMonth" = NULL`);
+        console.log(`[Plan] Resetting refresh count for upgrade from ${oldPlan} to ${newPlan} (no initial sync done yet)`);
+      } else {
+        console.log(`[Plan] NOT resetting refresh count for upgrade from ${oldPlan} to ${newPlan} (initial sync already done, count: ${currentShopData.refreshCount || 0})`);
+      }
     }
 
     if (updates.length === 0) {
